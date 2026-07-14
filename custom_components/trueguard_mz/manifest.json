@@ -1,0 +1,18 @@
+{
+  "domain": "trueguard_mz",
+  "name": "TrueGuard MZ",
+  "codeowners": ["@MRDonnii"],
+  "config_flow": true,
+  "documentation": "https://github.com/MRDonnii/trueguard-mz-home-assistant",
+  "issue_tracker": "https://github.com/MRDonnii/trueguard-mz-home-assistant/issues",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "dependencies": ["network"],
+  "dhcp": [
+    {
+      "macaddress": "001D94*"
+    }
+  ],
+  "requirements": [],
+  "version": "0.2.0"
+}

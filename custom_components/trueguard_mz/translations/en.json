@@ -1,0 +1,96 @@
+{
+  "title": "TrueGuard MZ",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up TrueGuard MZ",
+        "description": "Choose automatic discovery or enter the WebPanel address manually.",
+        "menu_options": {
+          "automatic": "Find panel automatically",
+          "manual": "Enter address manually"
+        }
+      },
+      "automatic": {
+        "title": "Find TrueGuard MZ",
+        "description": "Home Assistant scans its selected local IPv4 networks for the WebPanel fingerprint. Submit to scan again."
+      },
+      "credentials": {
+        "title": "Connect to discovered panel",
+        "description": "Found {count} compatible panel(s). Enter the login for the panel WebPanel.",
+        "data": {
+          "host": "Panel address",
+          "username": "Username",
+          "password": "Password",
+          "scan_interval": "Polling interval (seconds)"
+        },
+        "data_description": {
+          "scan_interval": "Choose 5-3600 seconds. Very short intervals create more traffic to the panel."
+        }
+      },
+      "manual": {
+        "title": "Connect manually",
+        "description": "Enter a local hostname or address and the WebPanel login.",
+        "data": {
+          "host": "Panel address",
+          "username": "Username",
+          "password": "Password",
+          "scan_interval": "Polling interval (seconds)"
+        },
+        "data_description": {
+          "scan_interval": "Choose 5-3600 seconds. Very short intervals create more traffic to the panel."
+        }
+      },
+      "dhcp_confirm": {
+        "title": "TrueGuard MZ discovered",
+        "description": "A compatible panel was found at {host}. Enter its WebPanel login to add it.",
+        "data": {
+          "username": "Username",
+          "password": "Password",
+          "scan_interval": "Polling interval (seconds)"
+        },
+        "data_description": {
+          "scan_interval": "Choose 5-3600 seconds. Very short intervals create more traffic to the panel."
+        }
+      },
+      "reconfigure": {
+        "title": "Change panel address",
+        "description": "Use this if the panel was moved and DHCP discovery did not update it automatically.",
+        "data": {
+          "host": "Panel address"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Update TrueGuard login",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to a compatible TrueGuard MZ panel",
+      "invalid_auth": "The panel rejected the username or password",
+      "no_devices_found": "No compatible WebPanel was found. Check the network selection or use manual setup."
+    },
+    "abort": {
+      "already_configured": "This panel is already configured",
+      "not_trueguard": "The discovered Climax device is not a compatible TrueGuard MZ WebPanel",
+      "reauth_successful": "Login updated successfully",
+      "reconfigure_successful": "Panel address updated successfully"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "TrueGuard MZ polling",
+        "description": "Changes are applied immediately by reloading the integration.",
+        "data": {
+          "scan_interval": "Polling interval (seconds)"
+        },
+        "data_description": {
+          "scan_interval": "Choose 5-3600 seconds. The panel receives two parallel page requests per poll."
+        }
+      }
+    }
+  }
+}

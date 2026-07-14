@@ -1,0 +1,6 @@
+{
+  "country": ["DK"],
+  "homeassistant": "2025.1.0",
+  "name": "TrueGuard MZ",
+  "render_readme": true
+}

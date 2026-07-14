@@ -1,0 +1,96 @@
+{
+  "title": "TrueGuard MZ",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Opsæt TrueGuard MZ",
+        "description": "Vælg automatisk søgning, eller indtast WebPanel-adressen manuelt.",
+        "menu_options": {
+          "automatic": "Find panelet automatisk",
+          "manual": "Indtast adressen manuelt"
+        }
+      },
+      "automatic": {
+        "title": "Find TrueGuard MZ",
+        "description": "Home Assistant søger på de valgte lokale IPv4-netværk efter WebPanel-fingeraftrykket. Tryk send for at søge igen."
+      },
+      "credentials": {
+        "title": "Forbind til fundet panel",
+        "description": "Der blev fundet {count} kompatible panel(er). Indtast login til panelets WebPanel.",
+        "data": {
+          "host": "Paneladresse",
+          "username": "Brugernavn",
+          "password": "Adgangskode",
+          "scan_interval": "Poll-interval (sekunder)"
+        },
+        "data_description": {
+          "scan_interval": "Vælg 5-3600 sekunder. Meget korte intervaller giver mere trafik til panelet."
+        }
+      },
+      "manual": {
+        "title": "Forbind manuelt",
+        "description": "Indtast et lokalt værtsnavn eller en adresse samt login til WebPanel.",
+        "data": {
+          "host": "Paneladresse",
+          "username": "Brugernavn",
+          "password": "Adgangskode",
+          "scan_interval": "Poll-interval (sekunder)"
+        },
+        "data_description": {
+          "scan_interval": "Vælg 5-3600 sekunder. Meget korte intervaller giver mere trafik til panelet."
+        }
+      },
+      "dhcp_confirm": {
+        "title": "TrueGuard MZ fundet",
+        "description": "Et kompatibelt panel blev fundet på {host}. Indtast dets WebPanel-login for at tilføje det.",
+        "data": {
+          "username": "Brugernavn",
+          "password": "Adgangskode",
+          "scan_interval": "Poll-interval (sekunder)"
+        },
+        "data_description": {
+          "scan_interval": "Vælg 5-3600 sekunder. Meget korte intervaller giver mere trafik til panelet."
+        }
+      },
+      "reconfigure": {
+        "title": "Skift paneladresse",
+        "description": "Brug dette, hvis panelet er flyttet, og DHCP-opdagelsen ikke opdaterede adressen automatisk.",
+        "data": {
+          "host": "Paneladresse"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Opdater TrueGuard-login",
+        "data": {
+          "username": "Brugernavn",
+          "password": "Adgangskode"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Kunne ikke forbinde til et kompatibelt TrueGuard MZ-panel",
+      "invalid_auth": "Panelet afviste brugernavn eller adgangskode",
+      "no_devices_found": "Der blev ikke fundet et kompatibelt WebPanel. Kontrollér netværksvalget, eller brug manuel opsætning."
+    },
+    "abort": {
+      "already_configured": "Dette panel er allerede konfigureret",
+      "not_trueguard": "Den fundne Climax-enhed er ikke et kompatibelt TrueGuard MZ WebPanel",
+      "reauth_successful": "Login blev opdateret",
+      "reconfigure_successful": "Paneladressen blev opdateret"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "TrueGuard MZ polling",
+        "description": "Ændringen anvendes straks ved at genindlæse integrationen.",
+        "data": {
+          "scan_interval": "Poll-interval (sekunder)"
+        },
+        "data_description": {
+          "scan_interval": "Vælg 5-3600 sekunder. Panelet modtager to parallelle sidekald for hvert poll."
+        }
+      }
+    }
+  }
+}
