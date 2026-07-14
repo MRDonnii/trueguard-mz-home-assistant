@@ -13,6 +13,6 @@
     <circle cx="153" cy="128" r="5" fill="#FFB020"/>
     <path fill="none" stroke="#2BE08A" stroke-linecap="round" stroke-width="8" d="M102 82c15-14 37-14 52 0M113 69c9-7 21-7 30 0"/>
   </g>
-  <text x="474" y="250" fill="#10231C" font-family="Arial, sans-serif" font-size="80" font-weight="700">TrueGuard MZ</text>
-  <text x="478" y="304" fill="#45695A" font-family="Arial, sans-serif" font-size="30">HOME ASSISTANT</text>
+  <text x="474" y="250" fill="#F4FFF9" font-family="Arial, sans-serif" font-size="80" font-weight="700">TrueGuard MZ</text>
+  <text x="478" y="304" fill="#9BB5AA" font-family="Arial, sans-serif" font-size="30">HOME ASSISTANT</text>
 </svg>
