@@ -4,6 +4,12 @@
   <img src="brand/logo.png" alt="TrueGuard MZ logo" width="420">
 </p>
 
+<p align="center">
+  <a href="https://my.home-assistant.io/redirect/hacs_repository/?owner=MRDonnii&repository=trueguard-mz-home-assistant&category=integration">
+    <img src="https://my.home-assistant.io/badges/hacs_repository.svg" alt="Open in HACS">
+  </a>
+</p>
+
 A local Home Assistant integration for older TrueGuard MZ, SecPro Sikring,
 and compatible Climax alarm panels with the built-in `WebPanel` interface.
 
