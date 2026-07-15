@@ -20,7 +20,7 @@ and compatible Climax alarm panels with the built-in `WebPanel` interface.
 - Manual hostname or IP setup as a fallback.
 - Automatic IP updates when a DHCP-discovered panel changes address.
 - User-selectable polling interval from 5 to 3600 seconds.
-- Alarm control with disarm, full arm (away), and partial arm (home).
+- Alarm control with disarm, full arm, and partial arm (`Deltilkobling`).
 - Door and window contacts, smoke, motion, and moisture sensors.
 - On/off modules and diagnostic signal sensors.
 - Local communication only; no cloud account is required.
