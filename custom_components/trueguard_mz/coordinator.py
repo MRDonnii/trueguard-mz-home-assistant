@@ -21,11 +21,25 @@ from .const import (
     DEFAULT_EVENT_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     EVENT_TRUEGUARD,
+    EVENT_TRUEGUARD_REPORT,
     GSM_INTERVAL_SECONDS,
     SETTINGS_INTERVAL_SECONDS,
 )
-from .events import arm_mode, entry_delay, exit_delay, zone_is_open, zone_name
-from .parser import LogEntry, PanelData, PanelInfo
+from .events import (
+    CODE_TEXT,
+    arm_mode,
+    entry_delay,
+    exit_delay,
+    parse_panel_time,
+    zone_is_open,
+    zone_name,
+)
+from .parser import LogEntry, PanelData, PanelInfo, ReportEvent
+from .receiver import PushReport
+
+# Push reports are kept until the panel's own report list shows them.
+PUSH_KEEP = timedelta(minutes=10)
+PUSH_MATCH = timedelta(minutes=2)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,6 +70,10 @@ class TrueGuardCoordinator(DataUpdateCoordinator[PanelData]):
         # Countdowns derived from state changes and the panel's area times.
         self.arming_until: datetime | None = None
         self.entry_until: datetime | None = None
+        # Reports pushed by the panel (receiver.py).
+        self.last_push: PushReport | None = None
+        self.last_push_at: datetime | None = None
+        self._push_reports: list[ReportEvent] = []
         self._seen_log: Counter[LogEntry] | None = None
         super().__init__(
             hass,
@@ -132,7 +150,7 @@ class TrueGuardCoordinator(DataUpdateCoordinator[PanelData]):
         data = replace(
             data,
             history=history,
-            reports=reports,
+            reports=self._merge_push(reports),
             gsm_status=gsm_status,
             settings=settings,
             panel_clock=panel_clock,
@@ -141,6 +159,71 @@ class TrueGuardCoordinator(DataUpdateCoordinator[PanelData]):
         self._track_countdowns(previous, data)
         self._fire_new_log_entries(data)
         return data
+
+    def _merge_push(self, reports: tuple[ReportEvent, ...]) -> tuple[ReportEvent, ...]:
+        """Put pushed reports the panel has not listed yet in front of its list."""
+        reports = tuple(report for report in reports if report.status != "Push")
+        now = dt_util.now().replace(tzinfo=None)
+        kept: list[ReportEvent] = []
+        for pushed in self._push_reports:
+            when = parse_panel_time(pushed.time)
+            if when is None or now - when > PUSH_KEEP:
+                continue
+            listed = any(
+                report.cid == pushed.cid
+                and report.zone == pushed.zone
+                and (listed_at := parse_panel_time(report.time)) is not None
+                and abs(listed_at - when) <= PUSH_MATCH
+                for report in reports
+            )
+            if not listed:
+                kept.append(pushed)
+        self._push_reports = kept
+        merged = sorted((*kept, *reports), key=lambda report: report.time, reverse=True)
+        return tuple(merged)
+
+    def async_handle_push(self, report: PushReport) -> None:
+        """Apply a report pushed by the panel and read its pages at once."""
+        self.last_push = report
+        self.last_push_at = dt_util.utcnow()
+        self.hass.bus.async_fire(
+            EVENT_TRUEGUARD_REPORT,
+            {
+                "format": report.format,
+                "account": report.account,
+                "cid": report.cid,
+                "qualifier": report.qualifier,
+                "code": report.code,
+                "sia_code": report.sia_code,
+                "group": report.group,
+                "zone": report.zone,
+                "zone_name": zone_name(self.data, report.zone)
+                if self.data and report.zone is not None
+                else None,
+                "config_entry_id": self.config_entry.entry_id,
+            },
+        )
+        if not report.cid or report.code == "602":
+            # Heartbeat or test report: only the "last contact" sensor changes.
+            self.async_update_listeners()
+            return
+        stamp = dt_util.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._push_reports.append(
+            ReportEvent(
+                time=stamp,
+                event=CODE_TEXT.get(report.code, f"CID {report.cid}"),
+                cid=report.cid,
+                group=report.group,
+                zone=report.zone,
+                status="Push",
+            )
+        )
+        if self.data is not None:
+            self.async_set_updated_data(
+                replace(self.data, reports=self._merge_push(self.data.reports))
+            )
+        self._events_read_at = None  # read the log and report list on the next poll
+        self.hass.async_create_task(self.async_request_refresh())
 
     def _track_countdowns(self, previous: PanelData | None, data: PanelData) -> None:
         """Start exit and entry countdowns from the panel's area times."""

@@ -22,6 +22,10 @@ from .api import (
 )
 from .const import (
     CONF_EVENT_INTERVAL,
+    CONF_RECEIVER,
+    CONF_RECEIVER_ACCOUNT,
+    CONF_RECEIVER_PORT,
+    DEFAULT_RECEIVER_PORT,
     CONF_SCAN_INTERVAL,
     DEFAULT_EVENT_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
@@ -318,9 +322,8 @@ class TrueGuardOptionsFlow(config_entries.OptionsFlowWithReload):
             CONF_SCAN_INTERVAL,
             self.config_entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
         )
-        events = self.config_entry.options.get(
-            CONF_EVENT_INTERVAL, DEFAULT_EVENT_INTERVAL
-        )
+        options = self.config_entry.options
+        events = options.get(CONF_EVENT_INTERVAL, DEFAULT_EVENT_INTERVAL)
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -330,6 +333,17 @@ class TrueGuardOptionsFlow(config_entries.OptionsFlowWithReload):
                         vol.Coerce(int),
                         vol.Range(min=MIN_EVENT_INTERVAL, max=MAX_EVENT_INTERVAL),
                     ),
+                    vol.Required(
+                        CONF_RECEIVER, default=options.get(CONF_RECEIVER, False)
+                    ): bool,
+                    vol.Required(
+                        CONF_RECEIVER_PORT,
+                        default=options.get(CONF_RECEIVER_PORT, DEFAULT_RECEIVER_PORT),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=1024, max=65535)),
+                    vol.Optional(
+                        CONF_RECEIVER_ACCOUNT,
+                        default=options.get(CONF_RECEIVER_ACCOUNT, ""),
+                    ): vol.All(str, vol.Match(r"^[0-9A-Fa-f]{0,16}$")),
                 }
             ),
         )

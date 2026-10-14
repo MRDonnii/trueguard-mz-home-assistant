@@ -5,13 +5,18 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .binary_sensor import _is_wireless, _kind
+from .const import CONF_RECEIVER, CONF_RECEIVER_PORT, DEFAULT_RECEIVER_PORT
 from .entity import TrueGuardEntity, TrueGuardPanelEntity
 from .events import describe, last_alarm, zone_last_event, zone_name
 
@@ -34,6 +39,8 @@ async def async_setup_entry(
         TrueGuardGsmSensor(coordinator, entry),
         TrueGuardClockOffsetSensor(coordinator, entry),
     ]
+    if entry.options.get(CONF_RECEIVER):
+        entities.append(TrueGuardLastContactSensor(coordinator, entry))
     for zone, device in coordinator.data.devices.items():
         type_name = device.device_type.casefold()
         if _is_wireless(device.device_type) or device.signal is not None:
@@ -229,3 +236,33 @@ class TrueGuardClockOffsetSensor(TrueGuardPanelEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {"panel_clock": self.coordinator.data.panel_clock}
+
+
+class TrueGuardLastContactSensor(TrueGuardPanelEntity, SensorEntity):
+    """When the panel last pushed a report (including test reports)."""
+
+    _attr_name = "Sidste kontakt fra centralen"
+    _attr_icon = "mdi:access-point-check"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "last_contact")
+
+    @property
+    def native_value(self):
+        return self.coordinator.last_push_at
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        report = self.coordinator.last_push
+        runtime = self.entry.runtime_data
+        return {
+            "listening": runtime.receiver is not None,
+            "port": self.entry.options.get(CONF_RECEIVER_PORT, DEFAULT_RECEIVER_PORT),
+            "format": report.format if report else None,
+            "cid": report.cid if report else None,
+            "sia_code": report.sia_code if report else None,
+            "zone": report.zone if report else None,
+            "account": report.account if report else None,
+        }

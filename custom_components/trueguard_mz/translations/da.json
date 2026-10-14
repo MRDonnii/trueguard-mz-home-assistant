@@ -86,11 +86,17 @@
         "description": "Ændringen anvendes straks ved at genindlæse integrationen.",
         "data": {
           "scan_interval": "Poll-interval (sekunder)",
-          "event_interval": "Hændelseslog-interval (sekunder)"
+          "event_interval": "Hændelseslog-interval (sekunder)",
+          "receiver_enabled": "Modtag rapporter fra centralen (SIA/Contact ID)",
+          "receiver_port": "Port",
+          "receiver_account": "Kontonummer (valgfrit)"
         },
         "data_description": {
           "scan_interval": "Vælg 0,5-3600 sekunder. Panelet modtager to parallelle sidekald for hvert poll.",
-          "event_interval": "Hvor ofte loggen og rapportlisten (alarmårsag, batteri, sabotage) læses. De læses også straks, når tilstanden eller en zone ændrer sig."
+          "event_interval": "Hvor ofte loggen og rapportlisten (alarmårsag, batteri, sabotage) læses. De læses også straks, når tilstanden eller en zone ændrer sig.",
+          "receiver_enabled": "Home Assistant lytter efter alarmrapporter, som centralen sender med det samme. Sæt en ledig plads under Rapport indst. til ip://KONTO@HA-IP:PORT/CID_SIA. Rør ikke pladser, som TrueConnect eller en kontrolcentral bruger.",
+          "receiver_port": "TCP-porten Home Assistant lytter på. Kun centralens egen IP-adresse får forbindelse.",
+          "receiver_account": "Skal passe til kontonummeret i rapportpladsen. Tomt = alle konti fra centralen."
         }
       }
     }

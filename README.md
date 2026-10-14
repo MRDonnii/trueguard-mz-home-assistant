@@ -34,6 +34,9 @@ and compatible Climax alarm panels with the built-in `WebPanel` interface.
   delay and `pending` during the entry delay of an entry zone, with a
   `countdown_until` attribute. Delays, siren time, and supervision time are
   read from the panel and exposed as attributes.
+- Optional push receiver: the panel's own alarm reporting (SIA DC-09 with
+  Contact ID or SIA codes, or raw Contact ID over IP) is received directly by
+  the integration, so alarms, arming, and faults show up at once.
 - **Ur-afvigelse** sensor: how far the panel clock is from Home Assistant, in
   minutes.
 - Door and window contacts, smoke, CO, heat, gas, glass-break, motion, and
@@ -95,6 +98,40 @@ The intervals can be selected during setup and changed later under:
 
 The GSM page is read every five minutes, `area.htm` and `panel.htm` (times and
 clock) every hour, and `index.htm` once at startup.
+
+## Push reports from the panel (SIA / Contact ID)
+
+The panel can send every alarm, arm/disarm, and fault report to up to eight
+receivers under **Rapport indst.** The integration can be one of them, so it
+does not have to wait for the next poll.
+
+1. In Home Assistant: **Settings > Devices & services > TrueGuard MZ >
+   Configure**. Turn on **Receive reports from the panel**, keep port `52010`
+   (or pick another free port), and optionally enter an account number.
+2. On the panel: **Rapport indst.**, pick a **free** row and set **Til** to
+
+   ```
+   ip://1234@HOME-ASSISTANT-IP:52010/CID_SIA
+   ```
+
+   where `1234` is the account number. Save, then press **Test**.
+3. The diagnostic sensor **Sidste kontakt fra centralen** shows the time of
+   the last report.
+
+Never change a row that is already in use, for example the TrueConnect row
+(`ip://…@www.trueconnect.dk…`) or a monitoring centre: that would stop their
+alarms. `/SIA` (SIA codes) and `/CID` (raw Contact ID) also work. Encrypted
+reporting (`/SES`) is not supported.
+
+Only connections from the panel's own IP address are accepted, and the
+traffic is not encrypted, so keep the panel and Home Assistant on a trusted
+LAN. With Home Assistant OS the port needs no mapping. In Docker, publish the
+port or use host networking.
+
+Every received report fires a `trueguard_mz_report` event with `format`,
+`account`, `cid`, `code`, `qualifier`, `sia_code`, `group`, `zone`, and
+`zone_name`. Alarm and fault reports update the entities at once and make the
+integration read the event log and report list right away.
 
 ## Events and automations
 

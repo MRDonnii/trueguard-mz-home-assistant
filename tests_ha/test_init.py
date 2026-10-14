@@ -272,3 +272,58 @@ async def test_migrates_v2_and_loads_v3_entries(hass, aioclient_mock):
     for entry in entries:
         assert entry.state.value == "loaded"
         assert entry.version == 3
+
+
+async def test_push_report_triggers_at_once(hass, aioclient_mock, socket_enabled):
+    """A pushed burglary report shows as triggered before the next poll."""
+    import asyncio
+
+    _mock_pages(aioclient_mock)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=3,
+        title="TrueGuard MZ",
+        data={"host": HOST, "username": "u", "password": "p", "scan_interval": 3600},
+        options={"receiver_enabled": True, "receiver_port": 0, "receiver_account": "1234"},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass.states.get("alarm_control_panel.trueguard_mz").state == "armed_away"
+    assert hass.states.get("sensor.trueguard_mz_sidste_kontakt_fra_centralen").state == "unknown"
+
+    server = entry.runtime_data.receiver
+    server._allowed = {"127.0.0.1"}  # the test connects from localhost
+    reports = []
+    hass.bus.async_listen("trueguard_mz_report", reports.append)
+
+    from custom_components.trueguard_mz.receiver import crc16
+
+    body = '"ADM-CID"0042L0#1234[#1234|1130 01 001]'
+    frame = b"\n" + f"{crc16(body.encode())}{len(body):04X}".encode() + body.encode() + b"\r"
+    reader, writer = await asyncio.open_connection("127.0.0.1", server.bound_port)
+    writer.write(frame)
+    await writer.drain()
+    ack = await asyncio.wait_for(reader.read(100), 5)
+    writer.close()
+    assert b'"ACK"0042L0#1234[]' in ack
+    await hass.async_block_till_done()
+
+    assert reports and reports[0].data["cid"] == "1130"
+    assert reports[0].data["zone_name"] == "Hoveddør"
+    alarm = hass.states.get("alarm_control_panel.trueguard_mz")
+    assert alarm.state == "triggered"
+    assert alarm.attributes["last_alarm"] == "Indbrud"
+    assert hass.states.get("sensor.trueguard_mz_sidste_kontakt_fra_centralen").state != "unknown"
+
+    # A wrong account is ignored without an ACK.
+    body = '"ADM-CID"0043L0#9999[#9999|1130 01 001]'
+    frame = b"\n" + f"{crc16(body.encode())}{len(body):04X}".encode() + body.encode() + b"\r"
+    reader, writer = await asyncio.open_connection("127.0.0.1", server.bound_port)
+    writer.write(frame)
+    await writer.drain()
+    assert await asyncio.wait_for(reader.read(100), 5) == b""
+    writer.close()
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    assert server.bound_port is None

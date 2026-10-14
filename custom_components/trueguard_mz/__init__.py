@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+from urllib.parse import urlparse
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
@@ -12,8 +14,18 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import TrueGuardClient
-from .const import DOMAIN, PLATFORMS
+from .const import (
+    CONF_RECEIVER,
+    CONF_RECEIVER_ACCOUNT,
+    CONF_RECEIVER_PORT,
+    DEFAULT_RECEIVER_PORT,
+    DOMAIN,
+    PLATFORMS,
+)
 from .coordinator import TrueGuardCoordinator
+from .receiver import ReportReceiver
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -22,6 +34,7 @@ class TrueGuardRuntimeData:
 
     client: TrueGuardClient
     coordinator: TrueGuardCoordinator
+    receiver: ReportReceiver | None = None
 
 
 async def async_migrate_entry(
@@ -59,6 +72,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = TrueGuardCoordinator(hass, entry, client)
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = TrueGuardRuntimeData(client, coordinator)
+    if entry.options.get(CONF_RECEIVER):
+        entry.runtime_data.receiver = await _async_start_receiver(
+            hass, entry, coordinator
+        )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     known_zones = set(coordinator.data.devices)
 
@@ -86,6 +103,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+async def _async_start_receiver(
+    hass: HomeAssistant, entry: ConfigEntry, coordinator: TrueGuardCoordinator
+) -> ReportReceiver | None:
+    """Start the push receiver; only the panel's own address may connect."""
+    host = urlparse(entry.data[CONF_HOST]).hostname or ""
+    allowed = {host}
+    try:
+        infos = await hass.loop.getaddrinfo(host, None)
+        allowed |= {info[4][0] for info in infos}
+    except OSError as err:
+        _LOGGER.warning("Could not resolve the TrueGuard panel %s: %s", host, err)
+    receiver = ReportReceiver(
+        port=entry.options.get(CONF_RECEIVER_PORT, DEFAULT_RECEIVER_PORT),
+        allowed_hosts=allowed,
+        account=entry.options.get(CONF_RECEIVER_ACCOUNT, ""),
+        on_report=coordinator.async_handle_push,
+    )
+    try:
+        await receiver.async_start()
+    except OSError as err:
+        _LOGGER.error(
+            "TrueGuard report receiver could not listen on port %s: %s",
+            receiver.port,
+            err,
+        )
+        return None
+    return receiver
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded and (receiver := entry.runtime_data.receiver) is not None:
+        await receiver.async_stop()
+    return unloaded

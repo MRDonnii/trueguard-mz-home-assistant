@@ -20,6 +20,13 @@ GSM_INTERVAL_SECONDS: Final = 300
 # Entry/exit/siren times and the panel clock (area.htm, panel.htm).
 SETTINGS_INTERVAL_SECONDS: Final = 3600
 
+# Push reports from the panel's report slots (SIA DC-09 / Contact ID over IP).
+CONF_RECEIVER: Final = "receiver_enabled"
+CONF_RECEIVER_PORT: Final = "receiver_port"
+CONF_RECEIVER_ACCOUNT: Final = "receiver_account"
+DEFAULT_RECEIVER_PORT: Final = 52010
+EVENT_TRUEGUARD_REPORT: Final = "trueguard_mz_report"
+
 # Fired on the event bus for every new row in the panel's event log.
 EVENT_TRUEGUARD: Final = "trueguard_mz_event"
 

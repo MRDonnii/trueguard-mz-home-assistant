@@ -26,12 +26,24 @@ ALARM_CODES = BURGLARY_CODES | TWENTY_FOUR_HOUR_CODES
 ARM_DISARM_CODES = frozenset({f"{code}" for code in range(400, 410)} | {"441", "442"})
 
 CODE_PANEL_TAMPER = "137"
-CODE_ZONE_TAMPER = "383"
+CODE_ZONE_TAMPER = ("383", "144")
 CODE_ZONE_LOW_BATTERY = "384"
-CODE_ZONE_SUPERVISION = "381"
+CODE_ZONE_SUPERVISION = ("381", "147")
 CODE_AC_LOSS = "301"
-CODE_PANEL_LOW_BATTERY = "302"
+CODE_PANEL_LOW_BATTERY = ("302", "309", "311")
 CODE_JAMMING = "344"
+CODE_TEST_REPORT = "602"
+
+# Short Danish texts for codes received by push before the panel logs them.
+CODE_TEXT = {
+    "110": "Brand", "111": "Røg", "120": "Panik", "121": "Tvangskode",
+    "130": "Indbrud", "131": "Indbrud (skalsikring)", "132": "Indbrud (indvendig)",
+    "134": "Indbrud (ind-/udgang)", "137": "Panel sabotage", "144": "Sabotage",
+    "147": "Mistet forbindelse", "151": "Gas", "154": "Vandudslip", "162": "CO",
+    "301": "230 V-fejl", "302": "Lavt batteri i central", "344": "Radiostøj",
+    "381": "Mistet forbindelse", "383": "Sabotage", "384": "Lavt batteri",
+    "401": "Til/frakobling", "441": "Deltilkobling", "602": "Testrapport",
+}
 
 # How long a reported alarm keeps the alarm entity in "triggered" when the
 # panel itself is never disarmed or re-armed afterwards.
@@ -57,13 +69,17 @@ def last_power_up(data: PanelData) -> str:
 
 
 def _latest_report(
-    reports: tuple[ReportEvent, ...], code: str, zone: int | None, since: str = ""
+    reports: tuple[ReportEvent, ...],
+    code: str | tuple[str, ...],
+    zone: int | None,
+    since: str = "",
 ) -> tuple[str, bool] | None:
     """Return (time, active) for the newest report with this code after `since`."""
+    codes = (code,) if isinstance(code, str) else code
     for event in reports:
         if event.time <= since:
             break
-        if event.code != code:
+        if event.code not in codes:
             continue
         if zone is not None and event.zone != zone:
             continue
@@ -100,7 +116,10 @@ def _newest(*candidates: tuple[str, bool] | None) -> bool | None:
 
 
 def _latest_status(
-    reports: tuple[ReportEvent, ...], code: str, zone: int | None, since: str = ""
+    reports: tuple[ReportEvent, ...],
+    code: str | tuple[str, ...],
+    zone: int | None,
+    since: str = "",
 ) -> bool | None:
     """Return True if the newest report with this code is active, False if restored."""
     latest = _latest_report(reports, code, zone, since)
@@ -127,7 +146,11 @@ def _fault_mentions(data: PanelData, names: tuple[str, ...], words: tuple[str, .
 
 
 def _zone_flag(
-    data: PanelData, zone: int, column: str | None, code: str, words: tuple[str, ...]
+    data: PanelData,
+    zone: int,
+    column: str | None,
+    code: str | tuple[str, ...],
+    words: tuple[str, ...],
 ) -> bool:
     """Combine the panel's live view with events since the last panel start.
 
