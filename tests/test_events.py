@@ -228,6 +228,14 @@ class TriggeredTests(unittest.TestCase):
         )
         self.assertFalse(events.alarm_is_triggered(data, self.now, armed=True))
 
+    def test_partial_arm_report_ends_alarm(self):
+        # The TrueGuard MZ reports partial arm as 3456.
+        data = self.data(
+            report("2026-01-02 11:59:30", "3456", 1),
+            report("2026-01-02 11:59:00", "1130", 1),
+        )
+        self.assertFalse(events.alarm_is_triggered(data, self.now, armed=True))
+
     def test_alarm_expires(self):
         data = self.data(report("2026-01-02 10:00:00", "1130", 1))
         self.assertFalse(events.alarm_is_triggered(data, self.now, armed=True))

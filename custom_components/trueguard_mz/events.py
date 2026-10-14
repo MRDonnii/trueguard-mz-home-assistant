@@ -23,7 +23,11 @@ TWENTY_FOUR_HOUR_CODES = frozenset(
     | {f"{code}" for code in range(150, 170)}  # water, temperature, CO, ...
 )
 ALARM_CODES = BURGLARY_CODES | TWENTY_FOUR_HOUR_CODES
-ARM_DISARM_CODES = frozenset({f"{code}" for code in range(400, 410)} | {"441", "442"})
+# Open/close codes. The TrueGuard MZ reports partial arm as 3456 and remote
+# disarm as 1401.
+ARM_DISARM_CODES = frozenset(
+    {f"{code}" for code in range(400, 410)} | {"441", "442", "456"}
+)
 
 CODE_PANEL_TAMPER = "137"
 CODE_ZONE_TAMPER = ("383", "144")
@@ -42,7 +46,8 @@ CODE_TEXT = {
     "147": "Mistet forbindelse", "151": "Gas", "154": "Vandudslip", "162": "CO",
     "301": "230 V-fejl", "302": "Lavt batteri i central", "344": "Radiostøj",
     "381": "Mistet forbindelse", "383": "Sabotage", "384": "Lavt batteri",
-    "401": "Til/frakobling", "441": "Deltilkobling", "602": "Testrapport",
+    "401": "Til/frakobling", "441": "Deltilkobling", "456": "Deltilkobling",
+    "602": "Testrapport",
 }
 
 # How long a reported alarm keeps the alarm entity in "triggered" when the
