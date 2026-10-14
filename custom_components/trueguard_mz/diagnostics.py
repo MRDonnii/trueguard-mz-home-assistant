@@ -10,7 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
 
-TO_REDACT = {CONF_HOST, CONF_PASSWORD, CONF_USERNAME, "mac"}
+TO_REDACT = {CONF_HOST, CONF_PASSWORD, CONF_USERNAME, "mac", "imei", "imsi", "account"}
 
 
 async def async_get_config_entry_diagnostics(
@@ -21,11 +21,27 @@ async def async_get_config_entry_diagnostics(
     data = coordinator.data
     return {
         "entry": async_redact_data(dict(entry.data), TO_REDACT),
-        "options": dict(entry.options),
+        "options": async_redact_data(dict(entry.options), {"receiver_account"}),
         "info": async_redact_data(asdict(coordinator.info), TO_REDACT),
         "alarm_state": data.alarm_state,
         "active_faults": list(data.active_faults),
         "gsm_status": data.gsm_status,
+        "commands": list(data.commands),
+        "settings": asdict(data.settings) if data.settings else None,
+        "panel_settings": asdict(data.panel_settings) if data.panel_settings else None,
+        "gsm_details": dict(data.gsm_details),
+        "captures": [asdict(capture) for capture in data.captures],
+        "receiver": {
+            "listening": entry.runtime_data.receiver is not None,
+            "last_contact": coordinator.last_push_at.isoformat()
+            if coordinator.last_push_at
+            else None,
+            "last_report": async_redact_data(
+                asdict(coordinator.last_push), {"account", "raw"}
+            )
+            if coordinator.last_push
+            else None,
+        },
         "devices": [asdict(device) for device in data.devices.values()],
         "history": [asdict(entry) for entry in data.history],
         "reports": [asdict(report) for report in data.reports],

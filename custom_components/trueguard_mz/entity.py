@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import MAJOR_VERSION, MINOR_VERSION
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import TrueGuardCoordinator
 from .parser import PanelDevice
+
+# Home Assistant 2026.8 links child devices by device id (via_device_id); the
+# older via_device identifier tuple stops working in 2027.8.
+VIA_DEVICE_ID = (MAJOR_VERSION, MINOR_VERSION) >= (2026, 8)
 
 
 def panel_device_info(entry: ConfigEntry, coordinator: TrueGuardCoordinator) -> DeviceInfo:
@@ -66,13 +71,18 @@ class TrueGuardEntity(CoordinatorEntity[TrueGuardCoordinator]):
     @property
     def device_info(self) -> DeviceInfo:
         device = self.coordinator.data.devices.get(self.zone)
-        return DeviceInfo(
+        info = DeviceInfo(
             identifiers={(DOMAIN, f"{self.entry.entry_id}_zone_{self.zone}")},
             name=device.name if device else f"Zone {self.zone}",
             manufacturer="TrueGuard / SecPro Sikring",
             model=device.device_type if device else None,
-            via_device=(DOMAIN, self.entry.entry_id),
         )
+        panel_device_id = self.entry.runtime_data.panel_device_id
+        if VIA_DEVICE_ID and panel_device_id:
+            info["via_device_id"] = panel_device_id
+        else:
+            info["via_device"] = (DOMAIN, self.entry.entry_id)  # type: ignore[typeddict-unknown-key]
+        return info
 
     @property
     def extra_state_attributes(self) -> dict[str, str | int | None]:

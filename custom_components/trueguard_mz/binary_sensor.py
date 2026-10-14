@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import timedelta
 import re
 
 from homeassistant.components.binary_sensor import (
@@ -11,16 +12,24 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.util import dt as dt_util
 
 from .entity import TrueGuardEntity, TrueGuardPanelEntity
+from .const import CONF_RECEIVER
 from .events import (
+    is_camera,
     panel_ac_failure,
     panel_battery_low,
     panel_jamming,
     panel_tamper,
+    reporting_failed,
+    walk_test_active,
     zone_battery_low,
+    zone_bypassed,
+    zone_fault,
     zone_supervision_lost,
     zone_tamper,
 )
@@ -62,6 +71,11 @@ _KIND_CLASSES = {
 }
 
 
+def _is_remote(device_type: str) -> bool:
+    value = device_type.casefold()
+    return "fjernbetjening" in value or "remote" in value
+
+
 def _is_wireless(device_type: str) -> bool:
     value = device_type.casefold()
     return not any(word in value for word in _WIRED_TYPES)
@@ -78,14 +92,25 @@ async def async_setup_entry(
         TrueGuardPanelBinarySensor(coordinator, entry, *description)
         for description in PANEL_SENSORS
     ]
+    if entry.options.get(CONF_RECEIVER):
+        entities.append(TrueGuardReportingAliveSensor(coordinator, entry))
     for zone, device in coordinator.data.devices.items():
-        if (kind := _kind(device.device_type)) is not None:
+        kind = _kind(device.device_type)
+        if kind is not None:
             entities.append(TrueGuardBinarySensor(coordinator, entry, zone, kind))
-        if _is_wireless(device.device_type):
-            entities.extend(
+        for description in ZONE_DIAGNOSTICS:
+            if description[0] == "connection":
+                # Modules report supervision too; handheld remotes do not.
+                if _is_remote(device.device_type):
+                    continue
+            elif not _is_wireless(device.device_type):
+                continue  # battery and tamper only on battery devices
+            entities.append(
                 TrueGuardZoneDiagnostic(coordinator, entry, zone, *description)
-                for description in ZONE_DIAGNOSTICS
             )
+        entities.append(TrueGuardZoneFaultSensor(coordinator, entry, zone))
+        if kind is not None or is_camera(device.device_type):
+            entities.append(TrueGuardZoneBypassSensor(coordinator, entry, zone))
     async_add_entities(entities)
 
 
@@ -170,6 +195,8 @@ PANEL_SENSORS: tuple[tuple[str, str, BinarySensorDeviceClass, PanelCheck], ...] 
     ("ac_failure", "230 V-fejl", BinarySensorDeviceClass.PROBLEM, panel_ac_failure),
     ("battery", "Batteri", BinarySensorDeviceClass.BATTERY, panel_battery_low),
     ("jamming", "Radiostøj", BinarySensorDeviceClass.PROBLEM, panel_jamming),
+    ("reporting", "Rapportering", BinarySensorDeviceClass.PROBLEM, reporting_failed),
+    ("walk_test", "Gå-test", BinarySensorDeviceClass.RUNNING, walk_test_active),
 )
 
 
@@ -195,3 +222,92 @@ class TrueGuardPanelBinarySensor(TrueGuardPanelEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         return self._check(self.coordinator.data)
+
+
+class TrueGuardZoneFaultSensor(TrueGuardEntity, BinarySensorEntity):
+    """A zone fault: 'Tilstand' column, active-fault list, or sensor trouble."""
+
+    _attr_name = "Fejl"
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry: ConfigEntry, zone: int) -> None:
+        super().__init__(coordinator, entry, zone)
+        self._attr_unique_id = f"{entry.entry_id}_zone_{zone}_fault"
+
+    @property
+    def is_on(self) -> bool:
+        return zone_fault(self.coordinator.data, self.zone) is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str | None]:
+        return {"reason": zone_fault(self.coordinator.data, self.zone)}
+
+
+class TrueGuardZoneBypassSensor(TrueGuardEntity, BinarySensorEntity):
+    """On while a zone is deactivated or bypassed on the panel."""
+
+    _attr_name = "Udkoblet"
+    _attr_icon = "mdi:shield-off-outline"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry: ConfigEntry, zone: int) -> None:
+        super().__init__(coordinator, entry, zone)
+        self._attr_unique_id = f"{entry.entry_id}_zone_{zone}_bypassed"
+
+    @property
+    def is_on(self) -> bool:
+        return zone_bypassed(self.coordinator.data, self.zone) is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str | None]:
+        return {"reason": zone_bypassed(self.coordinator.data, self.zone)}
+
+
+class TrueGuardReportingAliveSensor(TrueGuardPanelEntity, BinarySensorEntity):
+    """Whether the panel's reports reach Home Assistant.
+
+    Needs "Auto check-in" on the panel (Kontrolpanel), which sends a test
+    report at a fixed interval. Without it the state is unknown.
+    """
+
+    _attr_name = "Rapportering virker"
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "reporting_alive")
+        self._started = dt_util.utcnow()
+
+    def _window(self) -> timedelta | None:
+        settings = self.coordinator.data.panel_settings
+        if settings is None or not settings.checkin_interval:
+            return None
+        # One missed check-in is allowed before the state turns off.
+        return timedelta(seconds=settings.checkin_interval * 2 + 600)
+
+    @property
+    def is_on(self) -> bool | None:
+        if (window := self._window()) is None:
+            return None
+        last = self.coordinator.last_push_at or self._started
+        return dt_util.utcnow() - last <= window
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        settings = self.coordinator.data.panel_settings
+        return {
+            "checkin_interval": settings.checkin_interval if settings else None,
+            "last_contact": self.coordinator.last_push_at,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # Re-evaluate every five minutes: the state changes with time alone.
+        self.async_on_remove(
+            async_track_time_interval(self.hass, self._async_tick, timedelta(minutes=5))
+        )
+
+    @callback
+    def _async_tick(self, _now) -> None:
+        self.async_write_ha_state()

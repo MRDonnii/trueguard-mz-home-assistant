@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import re
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -11,14 +12,24 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory, UnitOfTime
+from homeassistant.const import (
+    EntityCategory,
+    UnitOfTemperature,
+    UnitOfTime,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .binary_sensor import _is_wireless, _kind
 from .const import CONF_RECEIVER, CONF_RECEIVER_PORT, DEFAULT_RECEIVER_PORT
 from .entity import TrueGuardEntity, TrueGuardPanelEntity
-from .events import describe, last_alarm, zone_last_event, zone_name
+from .events import (
+    describe,
+    last_alarm,
+    zone_last_event,
+    zone_name,
+    zone_temperature,
+)
 
 # Number of log rows exposed as an attribute on the panel's event sensor.
 RECENT_EVENTS = 25
@@ -41,6 +52,9 @@ async def async_setup_entry(
     ]
     if entry.options.get(CONF_RECEIVER):
         entities.append(TrueGuardLastContactSensor(coordinator, entry))
+    entities.append(TrueGuardLastBackupSensor(coordinator, entry))
+    if _gsm_signal(coordinator.data.gsm_details) is not None:
+        entities.append(TrueGuardGsmSignalSensor(coordinator, entry))
     for zone, device in coordinator.data.devices.items():
         type_name = device.device_type.casefold()
         if _is_wireless(device.device_type) or device.signal is not None:
@@ -52,6 +66,11 @@ async def async_setup_entry(
         ):
             entities.append(TrueGuardStatusSensor(coordinator, entry, zone))
         entities.append(TrueGuardZoneEventSensor(coordinator, entry, zone))
+        if (
+            zone_temperature(device.status) is not None
+            or "temperatur" in type_name
+        ):
+            entities.append(TrueGuardTemperatureSensor(coordinator, entry, zone))
     async_add_entities(entities)
 
 
@@ -266,3 +285,77 @@ class TrueGuardLastContactSensor(TrueGuardPanelEntity, SensorEntity):
             "zone": report.zone if report else None,
             "account": report.account if report else None,
         }
+
+
+def _gsm_signal(details: tuple[tuple[str, str], ...]) -> int | None:
+    """Return the GSM signal value from gsm.htm, if the page shows one."""
+    for key, value in details:
+        if "signal" in key and (match := re.search(r"-?\d+", value)):
+            return int(match.group())
+    return None
+
+
+class TrueGuardTemperatureSensor(TrueGuardEntity, SensorEntity):
+    """Temperature from a zone whose status shows °C."""
+
+    _attr_name = "Temperatur"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, coordinator, entry: ConfigEntry, zone: int) -> None:
+        super().__init__(coordinator, entry, zone)
+        self._attr_unique_id = f"{entry.entry_id}_zone_{zone}_temperature"
+
+    @property
+    def native_value(self) -> float | None:
+        return zone_temperature(self.device.status)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        settings = self.coordinator.data.panel_settings
+        return {
+            "zone": self.zone,
+            "alarm_above": settings.temperature_high if settings else None,
+            "alarm_below": settings.temperature_low if settings else None,
+        }
+
+
+class TrueGuardGsmSignalSensor(TrueGuardPanelEntity, SensorEntity):
+    """GSM signal from gsm.htm (only with a SIM card in the panel)."""
+
+    _attr_name = "GSM-signal"
+    _attr_icon = "mdi:signal-cellular-2"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "gsm_signal")
+
+    @property
+    def native_value(self) -> int | None:
+        return _gsm_signal(self.coordinator.data.gsm_details)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in self.coordinator.data.gsm_details
+            if key not in ("status",)
+        }
+
+
+class TrueGuardLastBackupSensor(TrueGuardPanelEntity, SensorEntity):
+    """When the panel configuration was last backed up to Home Assistant."""
+
+    _attr_name = "Seneste backup"
+    _attr_icon = "mdi:content-save-cog"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "last_backup")
+
+    @property
+    def native_value(self):
+        return self.coordinator.last_backup

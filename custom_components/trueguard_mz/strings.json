@@ -89,14 +89,18 @@
           "event_interval": "Event log interval (seconds)",
           "receiver_enabled": "Receive reports from the panel (SIA/Contact ID)",
           "receiver_port": "Port",
-          "receiver_account": "Account number (optional)"
+          "receiver_account": "Account number (optional)",
+          "auto_backup": "Monthly automatic backup",
+          "save_images": "Save camera pictures in Home Assistant"
         },
         "data_description": {
           "scan_interval": "Choose 0.5-3600 seconds. The panel receives two parallel page requests per poll.",
           "event_interval": "How often the event log and report list (alarm cause, battery, tamper) are read. They are also read at once when the arm state or a zone changes.",
           "receiver_enabled": "Home Assistant listens for alarm reports that the panel pushes at once. Set a free slot under Rapport indst. to ip://ACCOUNT@HA-IP:PORT/CID_SIA. Do not change slots used by TrueConnect or a monitoring centre.",
           "receiver_port": "The TCP port Home Assistant listens on. Only the panel's own IP address may connect.",
-          "receiver_account": "Must match the account number in the report slot. Empty accepts any account from the panel."
+          "receiver_account": "Must match the account number in the report slot. Empty accepts any account from the panel.",
+          "auto_backup": "Saves the panel configuration (cfg.bin) in /config/trueguard_mz/backups every 30 days and keeps the 12 newest. The file contains codes; do not share it.",
+          "save_images": "Saves every new PIR-camera picture in /media/trueguard_mz, because the panel keeps only the 10 newest."
         }
       }
     }

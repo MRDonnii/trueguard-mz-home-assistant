@@ -209,6 +209,66 @@ class StateTests(unittest.TestCase):
         )
 
 
+class LargePanelTests(unittest.TestCase):
+    def test_bypass_lasts_until_disarm(self):
+        reports = (
+            report("2026-01-02 11:00:00", "1570", 25),
+            report("2026-01-02 10:59:59", "3456", 1),
+        )
+        data = parser.PanelData("Deltilkobling", devices=DEVICES, reports=reports)
+        self.assertEqual(events.zone_bypassed(data, 25), "Zone bypass")
+        disarmed = parser.PanelData(
+            "Frakoblet",
+            devices=DEVICES,
+            reports=(report("2026-01-02 12:00:00", "1401", 1), *reports),
+        )
+        self.assertIsNone(events.zone_bypassed(disarmed, 25))
+
+    def test_permanent_deactivation_from_device_table(self):
+        devices = {5: parser.PanelDevice(5, "Røgsensor", "Røg", disabled="Permanent deaktiver")}
+        data = parser.PanelData("Frakoblet", devices=devices)
+        self.assertEqual(events.zone_bypassed(data, 5), "Permanent deaktiver")
+
+    def test_zone_fault_sources(self):
+        devices = {
+            18: parser.PanelDevice(18, "Tænd/sluk modul", "Garageport", condition="Funktionsfejl"),
+            3: parser.PanelDevice(3, "Dørkontakt", "Dør"),
+        }
+        data = parser.PanelData(
+            "Frakoblet", devices=devices, active_faults=("Zone3 (Dør): Sensortjek fejl",)
+        )
+        self.assertEqual(events.zone_fault(data, 18), "Funktionsfejl")
+        self.assertEqual(events.zone_fault(data, 3), "Zone3 (Dør): Sensortjek fejl")
+
+    def test_reporting_failed_skips_pending(self):
+        pending = parser.ReportEvent("2026-01-02 11:00:00", cid="1401", status="Venter på rapport")
+        failed = parser.ReportEvent("2026-01-02 10:00:00", cid="1401", status="Færdig(Ingen forbindelse)")
+        ok = parser.ReportEvent("2026-01-02 09:00:00", cid="1401", status="Færdig")
+        self.assertTrue(events.reporting_failed(parser.PanelData("x", reports=(pending, failed))))
+        self.assertFalse(events.reporting_failed(parser.PanelData("x", reports=(ok, failed))))
+
+    def test_arm_commands(self):
+        self.assertEqual(
+            events.arm_commands(("Frakoblet", "Fuldsikring", "Deltilkobling")),
+            {"disarm": "Frakoblet", "away": "Fuldsikring", "home": "Deltilkobling"},
+        )
+        mapping = events.arm_commands(
+            ("Frakoblet", "Fuldsikring", "Deltilkobling 1", "Deltilkobling 2", "Deltilkobling 3")
+        )
+        self.assertEqual(mapping["night"], "Deltilkobling 2")
+        self.assertEqual(mapping["custom"], "Deltilkobling 3")
+
+    def test_temperature_and_duress(self):
+        self.assertEqual(events.zone_temperature("21,5 °C"), 21.5)
+        self.assertIsNone(events.zone_temperature("Luk"))
+        data = parser.PanelData("Frakoblet", reports=(report("2026-01-02 11:59:00", "1121", 0),))
+        self.assertFalse(events.alarm_is_triggered(data, datetime(2026, 1, 2, 12), armed=False))
+
+    def test_supervision_from_log(self):
+        history = (parser.LogEntry("2026-01-02 10:00:00", "Zone18 (Garageport)", "", "Supervision fejl", 18),)
+        self.assertTrue(events.zone_supervision_lost(parser.PanelData("x", history=history), 18))
+
+
 class TriggeredTests(unittest.TestCase):
     now = datetime(2026, 1, 2, 12, 0, 0)
 

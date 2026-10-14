@@ -1,5 +1,6 @@
 """Constants for the TrueGuard MZ integration."""
 
+from datetime import timedelta
 from typing import Final
 
 DOMAIN: Final = "trueguard_mz"
@@ -27,10 +28,26 @@ CONF_RECEIVER_ACCOUNT: Final = "receiver_account"
 DEFAULT_RECEIVER_PORT: Final = 52010
 EVENT_TRUEGUARD_REPORT: Final = "trueguard_mz_report"
 
+# PIR camera pictures and configuration backups.
+CONF_SAVE_IMAGES: Final = "save_images"
+CONF_AUTO_BACKUP: Final = "auto_backup"
+EVENT_TRUEGUARD_IMAGE: Final = "trueguard_mz_image"
+AUTO_BACKUP_EVERY: Final = timedelta(days=30)
+BACKUPS_TO_KEEP: Final = 12
+
 # Fired on the event bus for every new row in the panel's event log.
 EVENT_TRUEGUARD: Final = "trueguard_mz_event"
 
-PLATFORMS: Final = ["alarm_control_panel", "binary_sensor", "sensor", "switch"]
+PLATFORMS: Final = [
+    "alarm_control_panel",
+    "binary_sensor",
+    "button",
+    "camera",
+    "cover",
+    "light",
+    "sensor",
+    "switch",
+]
 
 COMMAND_DISARM: Final = "Frakoblet"
 COMMAND_ARM_AWAY: Final = "Fuldsikring"

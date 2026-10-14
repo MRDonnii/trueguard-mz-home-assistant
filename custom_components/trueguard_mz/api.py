@@ -10,17 +10,23 @@ import aiohttp
 from .const import COMMAND_ARM_AWAY, COMMAND_ARM_HOME, COMMAND_DISARM
 from .parser import (
     AreaSettings,
+    Capture,
     LogEntry,
     PanelData,
     PanelInfo,
+    PanelSettings,
     ReportEvent,
     parse_control_page,
     parse_device_page,
     parse_gsm_page,
     parse_history_page,
     parse_area_page,
+    parse_capture_page,
+    parse_control_buttons,
+    parse_gsm_details,
     parse_info_page,
     parse_panel_clock,
+    parse_panel_page,
     parse_report_page,
 )
 
@@ -76,6 +82,26 @@ class TrueGuardClient:
             await asyncio.sleep(RETRY_DELAY)
             return await self._request_once(method, path, data)
 
+    async def async_fetch(self, path: str) -> tuple[bytes, str]:
+        """Download a file from the panel (picture, backup) with its content type."""
+        url = urljoin(f"{self.host}/", path)
+        try:
+            async with asyncio.timeout(30):
+                response = await self._session.get(url, auth=self._auth)
+                if response.status in (401, 403):
+                    raise TrueGuardAuthError("The panel rejected the login")
+                if response.status >= 400:
+                    raise TrueGuardConnectionError(
+                        f"Panel returned HTTP {response.status} for {path}"
+                    )
+                return await response.read(), response.headers.get(
+                    "Content-Type", ""
+                )
+        except TrueGuardError:
+            raise
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise TrueGuardConnectionError(str(err)) from err
+
     async def _request_once(
         self, method: str, path: str, data: dict[str, str] | None = None
     ) -> str:
@@ -120,15 +146,31 @@ class TrueGuardClient:
         """Read firmware and module versions."""
         return parse_info_page(await self._request("GET", "index.htm"))
 
-    async def async_get_settings(self) -> tuple[AreaSettings, str | None]:
-        """Read entry/exit/siren times (area.htm) and the panel clock (panel.htm)."""
+    async def async_get_settings(
+        self,
+    ) -> tuple[AreaSettings, str | None, PanelSettings]:
+        """Read area times (area.htm), the clock and check-in/temperature (panel.htm)."""
         area_html = await self._request("GET", "area.htm")
         panel_html = await self._request("GET", "panel.htm")
-        return parse_area_page(area_html), parse_panel_clock(panel_html)
+        return (
+            parse_area_page(area_html),
+            parse_panel_clock(panel_html),
+            parse_panel_page(panel_html),
+        )
 
-    async def async_get_gsm_status(self) -> str:
-        """Read the GSM module status."""
-        return parse_gsm_page(await self._request("GET", "gsm.htm"))
+    async def async_get_captures(self) -> tuple[Capture, ...]:
+        """Read the newest PIR-camera pictures and videos (capevent.htm)."""
+        return parse_capture_page(await self._request("GET", "capevent.htm"))
+
+    async def async_get_backup(self) -> bytes:
+        """Download the panel's configuration backup (cfg.bin)."""
+        data, _ = await self.async_fetch("cfg.bin")
+        return data
+
+    async def async_get_gsm(self) -> tuple[str, tuple[tuple[str, str], ...]]:
+        """Read the GSM module status and its other rows (signal, operator, ...)."""
+        html = await self._request("GET", "gsm.htm")
+        return parse_gsm_page(html), parse_gsm_details(html)
 
     async def async_get_data(self) -> PanelData:
         """Read alarm state and all device states."""
@@ -141,13 +183,39 @@ class TrueGuardClient:
             alarm_state=state,
             active_faults=faults,
             devices=parse_device_page(device_html),
+            commands=parse_control_buttons(control_html),
         )
 
-    async def async_set_alarm_state(self, command: str) -> None:
-        """Send one of the panel's supported alarm commands."""
-        if command not in (COMMAND_DISARM, COMMAND_ARM_AWAY, COMMAND_ARM_HOME):
+    async def async_set_alarm_state(
+        self, command: str, allowed: tuple[str, ...] = ()
+    ) -> None:
+        """Send one of the panel's arm/disarm buttons on control.htm."""
+        known = (COMMAND_DISARM, COMMAND_ARM_AWAY, COMMAND_ARM_HOME, *allowed)
+        if command not in known:
             raise ValueError(f"Unsupported alarm command: {command}")
         await self._request("POST", "control.htm", {"S": command})
+
+    async def _device_command(self, zone: int, command: str, **extra: str) -> None:
+        """Press a button on the device page for one zone."""
+        await self._request(
+            "POST", "device.htm", {f"Z{zone}": "1", "S": command, **extra}
+        )
+
+    async def async_take_picture(self, zone: int, flash: bool = True) -> None:
+        """Ask a PIR camera for a picture."""
+        await self._device_command(
+            zone, "Tag billede/video" if flash else "Tag billede (uden blitz)"
+        )
+
+    async def async_set_dimmer(self, zone: int, level: int) -> None:
+        """Set a dimmer module to 0-100 % (steps of 10)."""
+        await self._device_command(zone, "Dæmper niveau", B=str(level))
+
+    async def async_cover_command(self, zone: int, command: str) -> None:
+        """Send 'Op / lås', 'Ned / lås op', or 'Stop' to a module."""
+        if command not in ("Op / lås", "Ned / lås op", "Stop"):
+            raise ValueError(f"Unsupported module command: {command}")
+        await self._device_command(zone, command)
 
     async def async_set_switch(self, zone: int, turn_on: bool) -> None:
         """Control a panel switch module."""

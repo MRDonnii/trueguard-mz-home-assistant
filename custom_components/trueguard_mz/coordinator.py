@@ -6,16 +6,24 @@ from collections import Counter
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 import logging
+from pathlib import Path
+import re
 import time
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from .api import TrueGuardAuthError, TrueGuardClient, TrueGuardConnectionError
 from .const import (
+    AUTO_BACKUP_EVERY,
+    BACKUPS_TO_KEEP,
+    CONF_AUTO_BACKUP,
+    CONF_SAVE_IMAGES,
+    EVENT_TRUEGUARD_IMAGE,
     CONF_EVENT_INTERVAL,
     CONF_SCAN_INTERVAL,
     DEFAULT_EVENT_INTERVAL,
@@ -27,6 +35,7 @@ from .const import (
 )
 from .events import (
     CODE_TEXT,
+    is_camera,
     arm_mode,
     entry_delay,
     exit_delay,
@@ -34,7 +43,7 @@ from .events import (
     zone_is_open,
     zone_name,
 )
-from .parser import LogEntry, PanelData, PanelInfo, ReportEvent
+from .parser import Capture, LogEntry, PanelData, PanelInfo, ReportEvent
 from .receiver import PushReport
 
 # Push reports are kept until the panel's own report list shows them.
@@ -75,6 +84,8 @@ class TrueGuardCoordinator(DataUpdateCoordinator[PanelData]):
         self.last_push_at: datetime | None = None
         self._push_reports: list[ReportEvent] = []
         self._seen_log: Counter[LogEntry] | None = None
+        self._programming_seen: str | None = None
+        self.last_backup: datetime | None = None
         super().__init__(
             hass,
             _LOGGER,
@@ -104,6 +115,8 @@ class TrueGuardCoordinator(DataUpdateCoordinator[PanelData]):
         history = previous.history if previous else ()
         reports = previous.reports if previous else ()
         gsm_status = previous.gsm_status if previous else None
+        gsm_details = previous.gsm_details if previous else ()
+        captures = previous.captures if previous else ()
 
         changed = previous is None or (
             data.alarm_state,
@@ -123,10 +136,22 @@ class TrueGuardCoordinator(DataUpdateCoordinator[PanelData]):
                 _LOGGER.debug("Could not read the TrueGuard event log: %s", err)
             else:
                 self._events_read_at = now
+                if self.has_cameras(data):
+                    try:
+                        captures = await self.client.async_get_captures()
+                    except (TrueGuardConnectionError, ValueError) as err:
+                        _LOGGER.debug("Could not read TrueGuard pictures: %s", err)
+                if self._programming_finished(reports):
+                    self._settings_read_at = None  # settings may have changed
 
         if self._gsm_read_at is None or now - self._gsm_read_at >= GSM_INTERVAL_SECONDS:
             try:
-                gsm_status = await self.client.async_get_gsm_status()
+                gsm_status, details = await self.client.async_get_gsm()
+                gsm_details = tuple(
+                    (key, value)
+                    for key, value in details
+                    if key not in ("imei", "imsi") and "apn" not in key
+                )
             except (TrueGuardConnectionError, ValueError) as err:
                 _LOGGER.debug("Could not read the TrueGuard GSM status: %s", err)
             else:
@@ -135,12 +160,17 @@ class TrueGuardCoordinator(DataUpdateCoordinator[PanelData]):
         settings = previous.settings if previous else None
         panel_clock = previous.panel_clock if previous else None
         clock_offset = previous.clock_offset if previous else None
+        panel_settings = previous.panel_settings if previous else None
         if (
             self._settings_read_at is None
             or now - self._settings_read_at >= SETTINGS_INTERVAL_SECONDS
         ):
             try:
-                settings, panel_clock = await self.client.async_get_settings()
+                (
+                    settings,
+                    panel_clock,
+                    panel_settings,
+                ) = await self.client.async_get_settings()
             except (TrueGuardConnectionError, ValueError) as err:
                 _LOGGER.debug("Could not read TrueGuard settings: %s", err)
             else:
@@ -155,10 +185,121 @@ class TrueGuardCoordinator(DataUpdateCoordinator[PanelData]):
             settings=settings,
             panel_clock=panel_clock,
             clock_offset=clock_offset,
+            panel_settings=panel_settings,
+            gsm_details=gsm_details,
+            captures=captures,
         )
         self._track_countdowns(previous, data)
         self._fire_new_log_entries(data)
+        self._handle_new_captures(previous, data)
+        await self._async_auto_backup()
         return data
+
+    def request_events_soon(self) -> None:
+        """Read the event pages (and pictures) on the next polls for a while."""
+        self._events_read_at = None
+        for delay in (5, 15, 30):
+            async_call_later(self.hass, delay, self._async_force_events)
+
+    async def _async_force_events(self, _now) -> None:
+        self._events_read_at = None
+        await self.async_request_refresh()
+
+    @staticmethod
+    def has_cameras(data: PanelData) -> bool:
+        """Return True when a zone is a PIR camera."""
+        return any(is_camera(device.device_type) for device in data.devices.values())
+
+    def _programming_finished(self, reports: tuple[ReportEvent, ...]) -> bool:
+        """Return True once per new 'programming finished' report (CID 628)."""
+        newest = next((r.time for r in reports if r.code == "628"), None)
+        if newest is None or newest == self._programming_seen:
+            return False
+        first = self._programming_seen is None
+        self._programming_seen = newest
+        return not first
+
+    def _handle_new_captures(self, previous: PanelData | None, data: PanelData) -> None:
+        """Fire an event (and optionally save the files) for new camera pictures."""
+        if previous is None or not data.captures:
+            return
+        known = set(previous.captures)
+        for capture in reversed(data.captures):
+            if capture in known:
+                continue
+            self.hass.bus.async_fire(
+                EVENT_TRUEGUARD_IMAGE,
+                {
+                    "time": capture.time,
+                    "device": capture.device,
+                    "zone": capture.zone,
+                    "zone_name": zone_name(data, capture.zone)
+                    if capture.zone is not None
+                    else None,
+                    "kind": capture.kind,
+                    "links": list(capture.links),
+                    "config_entry_id": self.config_entry.entry_id,
+                },
+            )
+            if self.config_entry.options.get(CONF_SAVE_IMAGES):
+                self.hass.async_create_task(self._async_save_capture(capture))
+
+    async def async_capture_image(self, capture: Capture) -> tuple[bytes, str] | None:
+        """Download the first picture of a capture row."""
+        for link in sorted(capture.links, key=lambda link: not _looks_like_image(link)):
+            try:
+                content, content_type = await self.client.async_fetch(link)
+            except (TrueGuardConnectionError, ValueError) as err:
+                _LOGGER.debug("Could not fetch TrueGuard picture %s: %s", link, err)
+                continue
+            if content_type.startswith("image/") or _looks_like_image(link):
+                return content, content_type or "image/jpeg"
+            # A viewer page: follow its first picture.
+            text = content.decode("utf-8", errors="replace")
+            if match := re.search(r'<img[^>]+src="([^"]+)"', text, re.I):
+                try:
+                    picture, kind = await self.client.async_fetch(match.group(1))
+                except (TrueGuardConnectionError, ValueError):
+                    continue
+                return picture, kind or "image/jpeg"
+        return None
+
+    async def _async_save_capture(self, capture: Capture) -> None:
+        if (image := await self.async_capture_image(capture)) is None:
+            return
+        name = re.sub(r"[^0-9]", "", capture.time) or "unknown"
+        folder = Path(self.hass.config.path("media", "trueguard_mz", f"zone_{capture.zone}"))
+        await self.hass.async_add_executor_job(_write_file, folder, f"{name}.jpg", image[0])
+
+    async def async_backup(self) -> Path:
+        """Save the panel's configuration backup under /config/trueguard_mz/backups."""
+        content = await self.client.async_get_backup()
+        stamp = dt_util.now().strftime("%Y%m%d-%H%M%S")
+        folder = Path(self.hass.config.path("trueguard_mz", "backups"))
+        path = await self.hass.async_add_executor_job(
+            _write_backup, folder, f"cfg-{stamp}.bin", content
+        )
+        self.last_backup = dt_util.utcnow()
+        self.async_update_listeners()
+        return path
+
+    async def async_load_last_backup(self) -> None:
+        folder = Path(self.hass.config.path("trueguard_mz", "backups"))
+        newest = await self.hass.async_add_executor_job(_newest_backup, folder)
+        if newest is not None:
+            self.last_backup = dt_util.utc_from_timestamp(newest)
+
+    async def _async_auto_backup(self) -> None:
+        """Take a monthly backup when the option is on."""
+        if not self.config_entry.options.get(CONF_AUTO_BACKUP):
+            return
+        if self.last_backup and dt_util.utcnow() - self.last_backup < AUTO_BACKUP_EVERY:
+            return
+        try:
+            await self.async_backup()
+        except (TrueGuardConnectionError, OSError) as err:
+            _LOGGER.warning("Automatic TrueGuard backup failed: %s", err)
+            self.last_backup = dt_util.utcnow() - AUTO_BACKUP_EVERY + timedelta(hours=1)
 
     def _merge_push(self, reports: tuple[ReportEvent, ...]) -> tuple[ReportEvent, ...]:
         """Put pushed reports the panel has not listed yet in front of its list."""
@@ -203,6 +344,8 @@ class TrueGuardCoordinator(DataUpdateCoordinator[PanelData]):
                 "config_entry_id": self.config_entry.entry_id,
             },
         )
+        if report.code == "628":
+            self._settings_read_at = None
         if not report.cid or report.code == "602":
             # Heartbeat or test report: only the "last contact" sensor changes.
             self.async_update_listeners()
@@ -286,3 +429,28 @@ def _clock_offset(panel_clock: str | None) -> int | None:
         return None
     local = dt_util.now().replace(tzinfo=None, second=0, microsecond=0)
     return round((panel - local).total_seconds() / 60)
+
+
+def _looks_like_image(link: str) -> bool:
+    return bool(re.search(r"\.(jpe?g|png|bmp)(\?|$)", link, re.I))
+
+
+def _write_file(folder: Path, name: str, content: bytes) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_bytes(content)
+    return path
+
+
+def _write_backup(folder: Path, name: str, content: bytes) -> Path:
+    """Write a backup and keep only the newest BACKUPS_TO_KEEP files."""
+    path = _write_file(folder, name, content)
+    backups = sorted(folder.glob("cfg-*.bin"))
+    for old in backups[:-BACKUPS_TO_KEEP]:
+        old.unlink(missing_ok=True)
+    return path
+
+
+def _newest_backup(folder: Path) -> float | None:
+    backups = sorted(folder.glob("cfg-*.bin"))
+    return backups[-1].stat().st_mtime if backups else None

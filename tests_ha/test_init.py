@@ -327,3 +327,123 @@ async def test_push_report_triggers_at_once(hass, aioclient_mock, socket_enabled
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert server.bound_port is None
+
+
+BIG_DEVICE = """<table class=fm>
+<tr><td>Index</td><td>Type</td><td>Navn</td><td>Attribute</td><td>Tilstand</td>
+<td>Batteri</td><td>Sabotage</td><td>Deaktiver enhed</td><td>Signal</td><td>Status</td><td></td></tr>
+<tr><td>2</td><td>Dørkontakt</td><td>Bryggersdør</td><td>Indgang1</td><td></td><td></td><td></td><td></td><td>9</td><td>Luk</td><td></td></tr>
+<tr><td>5</td><td>Røgsensor</td><td>Røg 1st</td><td>24 Timer</td><td></td><td></td><td></td><td>Permanent deaktiver</td><td>9</td><td></td><td></td></tr>
+<tr><td>15</td><td>PIR m. kamera</td><td>Kamera gang</td><td>Fuldsikring</td><td></td><td></td><td></td><td></td><td>9</td><td></td><td></td></tr>
+<tr><td>18</td><td>Tænd/sluk modul</td><td>Garageport</td><td></td><td>Funktionsfejl</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr><td>20</td><td>Dæmper modul</td><td>Lampe</td><td></td><td></td><td></td><td></td><td></td><td></td><td>50 %</td><td></td></tr>
+<tr><td>21</td><td>Rullegardin</td><td>Gardin</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr><td>22</td><td>Temperatursensor</td><td>Kælder</td><td></td><td></td><td></td><td></td><td></td><td>7</td><td>21,5 °C</td><td></td></tr>
+<tr><td>25</td><td>Dørkontakt</td><td>Garagedør</td><td>Indbrud</td><td></td><td></td><td></td><td></td><td>9</td><td>Åben</td><td></td></tr>
+</table>"""
+
+BIG_CONTROL = """<form>Panel tilstand:Deltilkobling 2<br/>
+<input name="S" value="Frakoblet" type=submit class=sbtn  />
+<input name="S" value="Fuldsikring" type=submit class=sbtn  />
+<input name="S" value="Deltilkobling 1" type=submit class=sbtn  />
+<input name="S" value="Deltilkobling 2" type=submit class=sbtn  />
+<input name="S" value="Deltilkobling 3" type=submit class=sbtn  />
+<table class=fm><tr><td>Aktive fejl</td><td></td></tr>
+<tr><td>Sensortjek fejl</td><td>Zone18 (Garageport)</td></tr></table></form>"""
+
+BIG_REPORTS = """<table class=fm><tr><td>Tid</td><td>Hændelse</td><td>CID hændelse</td>
+<td>Gruppe</td><td>Zone / Bruger</td><td>Status</td></tr>
+<tr><td>2026-01-02 11:00:05</td><td>Gå-test</td><td>1607</td><td>0</td><td>0</td><td>Færdig(Ingen forbindelse)</td></tr>
+<tr><td>2026-01-02 11:00:00</td><td>Zone bypass</td><td>1570</td><td>1</td><td>25</td><td>Færdig</td></tr>
+<tr><td>2026-01-02 10:59:59</td><td>Deltilkobling</td><td>3456</td><td>1</td><td>1</td><td>Færdig</td></tr>
+<tr><td>2026-01-02 10:00:00</td><td>Supervision fejl</td><td>1147</td><td>1</td><td>18</td><td>Færdig</td></tr>
+</table>"""
+
+CAPTURES = """<table class=fm><tr><td>Tid</td><td>Enhed</td><td>Type</td><td>Status</td></tr>
+<tr><td>2026-01-02 11:01:00</td><td>Zone15 (Kamera gang)</td><td>Billede</td>
+<td><a href="cap1.jpg">Vis</a></td></tr></table>"""
+
+PANEL_CHECKIN = _panel_page() + (
+    "<table><tr><td>Auto check-in:</td><td>Interval:"
+    '<select name="i"><option value="0">Ikke aktiv</option>'
+    '<option value="240" selected>4 timer</option></select></td></tr>'
+    "<tr><td>Høj temperatur:</td><td>"
+    '<select name="h"><option value="30" selected>30 °C</option></select></td></tr></table>'
+)
+
+
+async def test_large_panel_features(hass, aioclient_mock, freezer, tmp_path, socket_enabled):
+    """Cameras, dimmer, cover, temperature, faults, bypass, walk test, arm modes."""
+    freezer.move_to("2026-01-02 11:02:00+01:00")
+    await hass.config.async_set_time_zone("Europe/Copenhagen")
+    _mock_pages(
+        aioclient_mock,
+        control=BIG_CONTROL,
+        device=BIG_DEVICE,
+        rptevent=BIG_REPORTS,
+        capevent=CAPTURES,
+        panel=PANEL_CHECKIN,
+    )
+    aioclient_mock.get(f"{HOST}/cap1.jpg", content=b"\xff\xd8JPEGDATA", headers={"Content-Type": "image/jpeg"})
+    aioclient_mock.get(f"{HOST}/cfg.bin", content=b"CFGDATA")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=3,
+        title="TrueGuard MZ",
+        data={"host": HOST, "username": "u", "password": "p", "scan_interval": 10},
+        options={"receiver_enabled": True, "receiver_port": 0},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    get = hass.states.get
+
+    alarm = get("alarm_control_panel.trueguard_mz")
+    assert alarm.state == "armed_night"
+    assert alarm.attributes["supported_features"] == 1 | 2 | 4 | 16  # home, away, night, custom
+
+    assert get("binary_sensor.garageport_fejl").state == "on"
+    assert get("binary_sensor.garageport_fejl").attributes["reason"] == "Funktionsfejl"
+    assert get("binary_sensor.rog_1st_udkoblet").state == "on"
+    assert get("binary_sensor.garagedor_udkoblet").state == "on"  # CID 1570
+    assert get("binary_sensor.bryggersdor_udkoblet").state == "off"
+    assert get("binary_sensor.garageport_forbindelse").state == "off"  # CID 1147
+    assert get("binary_sensor.garageport_batteri") is None  # mains module
+    assert get("binary_sensor.trueguard_mz_ga_test").state == "on"
+    assert get("binary_sensor.trueguard_mz_rapportering").state == "on"
+    assert get("binary_sensor.trueguard_mz_rapportering_virker").state == "on"
+
+    assert get("sensor.kaelder_temperatur").state == "21.5"
+    assert get("sensor.kaelder_temperatur").attributes["alarm_above"] == 30
+    lamp = get("light.lampe")
+    assert lamp.state == "on" and lamp.attributes["brightness"] == 128
+    assert get("cover.gardin") is not None
+    assert get("switch.garageport") is not None
+
+    camera = get("camera.kamera_gang_billede")
+    assert camera.attributes["time"] == "2026-01-02 11:01:00"
+    from homeassistant.components.camera import async_get_image
+
+    image = await async_get_image(hass, "camera.kamera_gang_billede")
+    assert image.content == b"\xff\xd8JPEGDATA"
+    assert get("button.kamera_gang_tag_billede") is not None
+
+    # Arm night presses "Deltilkobling 2" on control.htm.
+    aioclient_mock.post(f"{HOST}/control.htm", text=BIG_CONTROL)
+    await hass.services.async_call(
+        "alarm_control_panel", "alarm_arm_night",
+        {"entity_id": "alarm_control_panel.trueguard_mz"}, blocking=True,
+    )
+    posted = [call for call in aioclient_mock.mock_calls if call[0] == "POST"]
+    assert posted[-1][2] == {"S": "Deltilkobling 2"}
+
+    # Backup button writes /config/trueguard_mz/backups/cfg-*.bin.
+    hass.config.config_dir = str(tmp_path)
+    await hass.services.async_call(
+        "button", "press", {"entity_id": "button.trueguard_mz_tag_backup"}, blocking=True
+    )
+    await hass.async_block_till_done()
+    backups = list((tmp_path / "trueguard_mz" / "backups").glob("cfg-*.bin"))
+    assert len(backups) == 1 and backups[0].read_bytes() == b"CFGDATA"
+    assert get("sensor.trueguard_mz_seneste_backup").state != "unknown"
+    assert await hass.config_entries.async_unload(entry.entry_id)

@@ -12,6 +12,7 @@ from homeassistant.components.alarm_control_panel import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
@@ -22,6 +23,7 @@ from .entity import TrueGuardPanelEntity
 from .events import (
     ALARM_HOLD,
     alarm_is_triggered,
+    arm_commands,
     arm_mode,
     exit_delay,
     last_alarm,
@@ -42,6 +44,10 @@ async def async_setup_entry(
 def _text_state(value: str) -> AlarmControlPanelState | None:
     """Map the panel's own state text to an alarm state."""
     value = value.casefold()
+    if "deltilkobling 2" in value:
+        return AlarmControlPanelState.ARMED_NIGHT
+    if "deltilkobling 3" in value:
+        return AlarmControlPanelState.ARMED_CUSTOM_BYPASS
     if "alarm" in value or "udløst" in value:
         return AlarmControlPanelState.TRIGGERED
     if "tilkobler" in value or "udgang" in value:
@@ -62,14 +68,35 @@ class TrueGuardAlarm(TrueGuardPanelEntity, AlarmControlPanelEntity):
 
     _attr_name = None
     _attr_code_arm_required = False
-    _attr_supported_features = (
-        AlarmControlPanelEntityFeature.ARM_AWAY
-        | AlarmControlPanelEntityFeature.ARM_HOME
-    )
 
     def __init__(self, coordinator: TrueGuardCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry, "alarm")
         self._cancel_timer: CALLBACK_TYPE | None = None
+
+    def _commands(self) -> dict[str, str]:
+        """Arm modes the panel offers, from the buttons on control.htm."""
+        commands = arm_commands(self.coordinator.data.commands)
+        if not commands:  # older snapshot without buttons: the classic three
+            commands = {
+                "disarm": COMMAND_DISARM,
+                "away": COMMAND_ARM_AWAY,
+                "home": COMMAND_ARM_HOME,
+            }
+        return commands
+
+    @property
+    def supported_features(self) -> AlarmControlPanelEntityFeature:
+        commands = self._commands()
+        features = AlarmControlPanelEntityFeature(0)
+        for mode, feature in (
+            ("away", AlarmControlPanelEntityFeature.ARM_AWAY),
+            ("home", AlarmControlPanelEntityFeature.ARM_HOME),
+            ("night", AlarmControlPanelEntityFeature.ARM_NIGHT),
+            ("custom", AlarmControlPanelEntityFeature.ARM_CUSTOM_BYPASS),
+        ):
+            if mode in commands:
+                features |= feature
+        return features
 
     def _hold(self) -> timedelta:
         """How long a reported alarm counts as triggered: the panel's siren time."""
@@ -96,6 +123,8 @@ class TrueGuardAlarm(TrueGuardPanelEntity, AlarmControlPanelEntity):
         armed = state in (
             AlarmControlPanelState.ARMED_AWAY,
             AlarmControlPanelState.ARMED_HOME,
+            AlarmControlPanelState.ARMED_NIGHT,
+            AlarmControlPanelState.ARMED_CUSTOM_BYPASS,
             AlarmControlPanelState.PENDING,
         )
         now = dt_util.now().replace(tzinfo=None)
@@ -183,15 +212,26 @@ class TrueGuardAlarm(TrueGuardPanelEntity, AlarmControlPanelEntity):
             )
         return attributes
 
-    async def _send(self, command: str) -> None:
-        await self.coordinator.client.async_set_alarm_state(command)
+    async def _send(self, mode: str) -> None:
+        commands = self._commands()
+        if mode not in commands:
+            raise HomeAssistantError(f"The panel has no button for {mode}")
+        await self.coordinator.client.async_set_alarm_state(
+            commands[mode], tuple(commands.values())
+        )
         await self.coordinator.async_request_refresh()
 
     async def async_alarm_disarm(self, code: str | None = None) -> None:
-        await self._send(COMMAND_DISARM)
+        await self._send("disarm")
 
     async def async_alarm_arm_away(self, code: str | None = None) -> None:
-        await self._send(COMMAND_ARM_AWAY)
+        await self._send("away")
 
     async def async_alarm_arm_home(self, code: str | None = None) -> None:
-        await self._send(COMMAND_ARM_HOME)
+        await self._send("home")
+
+    async def async_alarm_arm_night(self, code: str | None = None) -> None:
+        await self._send("night")
+
+    async def async_alarm_arm_custom_bypass(self, code: str | None = None) -> None:
+        await self._send("custom")

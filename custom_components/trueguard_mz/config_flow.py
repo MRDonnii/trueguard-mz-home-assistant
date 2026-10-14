@@ -21,6 +21,8 @@ from .api import (
     normalize_host,
 )
 from .const import (
+    CONF_AUTO_BACKUP,
+    CONF_SAVE_IMAGES,
     CONF_EVENT_INTERVAL,
     CONF_RECEIVER,
     CONF_RECEIVER_ACCOUNT,
@@ -344,6 +346,12 @@ class TrueGuardOptionsFlow(config_entries.OptionsFlowWithReload):
                         CONF_RECEIVER_ACCOUNT,
                         default=options.get(CONF_RECEIVER_ACCOUNT, ""),
                     ): vol.All(str, vol.Match(r"^[0-9A-Fa-f]{0,16}$")),
+                    vol.Required(
+                        CONF_AUTO_BACKUP, default=options.get(CONF_AUTO_BACKUP, False)
+                    ): bool,
+                    vol.Required(
+                        CONF_SAVE_IMAGES, default=options.get(CONF_SAVE_IMAGES, False)
+                    ): bool,
                 }
             ),
         )

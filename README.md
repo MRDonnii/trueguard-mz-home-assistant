@@ -41,7 +41,26 @@ and compatible Climax alarm panels with the built-in `WebPanel` interface.
   minutes.
 - Door and window contacts, smoke, CO, heat, gas, glass-break, motion, and
   moisture sensors.
-- On/off modules and diagnostic signal sensors.
+- On/off modules as switches, dimmer modules as lights with brightness, and
+  blind modules as covers (Op / Ned / Stop).
+- PIR cameras (`PIR m. kamera`): a camera entity with the newest picture from
+  Billeder/Video, **Tag billede** buttons (with and without flash), a
+  `trueguard_mz_image` event, and optional saving of every picture under
+  `/media/trueguard_mz`.
+- Temperature in °C for zones whose status shows a temperature, with the
+  panel's high/low alarm limits as attributes.
+- **Fejl** per zone (the device table's Tilstand column, the active-fault
+  list, or sensor trouble) and **Udkoblet** per zone ("Permanent deaktiver" or
+  an automatic zone bypass when arming with an open zone).
+- **Rapportering** (the newest report could not be delivered), **Gå-test**,
+  and, with the push receiver, **Rapportering virker** based on the panel's
+  Auto check-in.
+- Arm modes follow the panel's buttons: Deltilkobling 1/2/3 become home,
+  night, and custom bypass when the panel has them.
+- **Tag backup** button and an optional monthly backup of the panel
+  configuration (`cfg.bin`) under `/config/trueguard_mz/backups` (12 kept).
+- GSM signal sensor when the panel shows one (needs a SIM card).
+- Diagnostic signal sensors.
 - Zone names and types follow the panel: a rename on the panel updates the
   device in Home Assistant, and added or removed zones reload the integration.
 - Diagnostics download with credentials and MAC address redacted.
@@ -132,6 +151,15 @@ Every received report fires a `trueguard_mz_report` event with `format`,
 `account`, `cid`, `code`, `qualifier`, `sia_code`, `group`, `zone`, and
 `zone_name`. Alarm and fault reports update the entities at once and make the
 integration read the event log and report list right away.
+
+## Contact ID codes
+
+Besides alarms, arming, tamper, battery, supervision, mains, and jamming, the
+integration understands 121 (duress: fires the event but never shows the alarm
+as triggered), 144 and 147 (sensor tamper and supervision), 309/311 (panel
+battery), 374 (armed with fault), 380 (sensor fault), 456 (partial arm), 570
+(zone bypass), 607 (walk test), and 628 (programming finished: the settings are
+read again).
 
 ## Events and automations
 

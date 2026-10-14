@@ -12,7 +12,9 @@ from .entity import TrueGuardEntity
 
 def _is_switch(device_type: str) -> bool:
     value = device_type.casefold()
-    return "tænd/sluk" in value or "switch" in value
+    if "dæmper" in value or "dimmer" in value:
+        return False  # dimmers are lights (light.py)
+    return "tænd/sluk" in value or "switch" in value or "strømstyring" in value
 
 
 async def async_setup_entry(

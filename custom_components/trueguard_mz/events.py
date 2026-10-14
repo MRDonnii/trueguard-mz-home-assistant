@@ -8,6 +8,7 @@ digits are the event code. Both lists are ordered newest first.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import re
 
 from .parser import LogEntry, PanelData, ReportEvent
 
@@ -19,7 +20,7 @@ BURGLARY_CODES = frozenset(
 TWENTY_FOUR_HOUR_CODES = frozenset(
     {"100", "101", "102"}  # medical
     | {f"{code}" for code in range(110, 119)}  # fire
-    | {"120", "121", "122", "123"}  # panic, duress
+    | {"120", "122", "123"}  # panic (121 duress is silent, see CODE_DURESS)
     | {f"{code}" for code in range(150, 170)}  # water, temperature, CO, ...
 )
 ALARM_CODES = BURGLARY_CODES | TWENTY_FOUR_HOUR_CODES
@@ -37,6 +38,12 @@ CODE_AC_LOSS = "301"
 CODE_PANEL_LOW_BATTERY = ("302", "309", "311")
 CODE_JAMMING = "344"
 CODE_TEST_REPORT = "602"
+CODE_DURESS = "121"
+CODE_ZONE_FAULT = "380"
+CODE_ZONE_BYPASS = "570"
+CODE_WALK_TEST = "607"
+CODE_PROGRAMMING = ("627", "628")
+DISARM_CODES = frozenset({f"{code}" for code in range(400, 410)})
 
 # Short Danish texts for codes received by push before the panel logs them.
 CODE_TEXT = {
@@ -46,8 +53,10 @@ CODE_TEXT = {
     "147": "Mistet forbindelse", "151": "Gas", "154": "Vandudslip", "162": "CO",
     "301": "230 V-fejl", "302": "Lavt batteri i central", "344": "Radiostøj",
     "381": "Mistet forbindelse", "383": "Sabotage", "384": "Lavt batteri",
+    "374": "Tilkoblet med fejl", "380": "Sensorfejl",
     "401": "Til/frakobling", "441": "Deltilkobling", "456": "Deltilkobling",
-    "602": "Testrapport",
+    "461": "Forkert kode", "570": "Zone bypass", "602": "Testrapport",
+    "607": "Gå-test", "627": "Programmering startet", "628": "Programmering afsluttet",
 }
 
 # How long a reported alarm keeps the alarm entity in "triggered" when the
@@ -195,8 +204,12 @@ def zone_tamper(data: PanelData, zone: int) -> bool:
 
 def zone_supervision_lost(data: PanelData, zone: int) -> bool:
     """Return True when the panel has lost contact with a zone device."""
+    since = last_power_up(data)
     return bool(
-        _latest_status(data.reports, CODE_ZONE_SUPERVISION, zone, last_power_up(data))
+        _newest(
+            _latest_report(data.reports, CODE_ZONE_SUPERVISION, zone, since),
+            _latest_log(data.history, zone, ("supervision",), since),
+        )
     )
 
 
@@ -352,3 +365,115 @@ def exit_delay(data: PanelData, mode: str) -> int:
     if data.settings is None:
         return 0
     return data.settings.exit_away if mode == "away" else data.settings.exit_home
+
+
+def zone_fault(data: PanelData, zone: int) -> str | None:
+    """Return why a zone is faulty, or None.
+
+    Sources: the device table's "Tilstand" column (e.g. "Funktionsfejl"), the
+    panel's active-fault list, and sensor-trouble reports (CID 380).
+    """
+    device = data.devices.get(zone)
+    if device and (condition := device.condition.strip()):
+        if condition.casefold() not in _OK_WORDS:
+            return condition
+    names = (f"zone{zone} ", f"zone{zone}:", f"zone {zone} ", device.name if device else "")
+    for fault in data.active_faults:
+        text = fault.casefold()
+        if any(name and name.casefold() in text for name in names):
+            return fault
+    if _latest_status(data.reports, CODE_ZONE_FAULT, zone, last_power_up(data)):
+        return "Sensorfejl"
+    return None
+
+
+def zone_bypassed(data: PanelData, zone: int) -> str | None:
+    """Return how a zone is bypassed, or None.
+
+    "Deaktiver enhed" in the device table is a lasting bypass (for example
+    "Permanent deaktiver"). A zone bypass report (CID 570) lasts until the
+    panel is disarmed or the zone is restored.
+    """
+    device = data.devices.get(zone)
+    if device and (disabled := device.disabled.strip()):
+        if disabled.casefold() not in _OK_WORDS:
+            return disabled
+    since = last_power_up(data)
+    for event in data.reports:
+        if event.time <= since:
+            break
+        if event.code in DISARM_CODES and event.qualifier == "1":
+            return None
+        if event.code == CODE_ZONE_BYPASS and event.zone == zone:
+            return "Zone bypass" if event.qualifier == "1" else None
+    return None
+
+
+def reporting_failed(data: PanelData) -> bool:
+    """Return True when the newest report could not be delivered."""
+    for event in data.reports:
+        if event.status == "Push":
+            continue
+        status = event.status.casefold()
+        if "venter" in status:
+            continue
+        return "ingen forbindelse" in status or "fejl" in status
+    return False
+
+
+def walk_test_active(data: PanelData) -> bool:
+    """Return True while the panel is in walk-test mode (CID 607)."""
+    return bool(_latest_status(data.reports, CODE_WALK_TEST, None, last_power_up(data)))
+
+
+def zone_temperature(device_status: str) -> float | None:
+    """Return a temperature in °C from a zone status like '21,5 °C'."""
+    match = re.search(r"(-?\d+(?:[.,]\d+)?)\s*°\s*C", device_status)
+    return float(match.group(1).replace(",", ".")) if match else None
+
+
+def arm_commands(commands: tuple[str, ...]) -> dict[str, str]:
+    """Map Home Assistant arm modes to the panel's control.htm buttons.
+
+    Panels with one partial-arm button use it for "home". Panels with
+    numbered partial arms use 1 for home, 2 for night, and 3 for custom.
+    """
+    found = {command.casefold(): command for command in commands}
+    mapping: dict[str, str] = {}
+    for command in commands:
+        value = command.casefold()
+        if value.startswith("frakobl"):
+            mapping["disarm"] = command
+        elif value.startswith("fuldsikring"):
+            mapping["away"] = command
+    numbered = {
+        number: found[key]
+        for number in ("1", "2", "3")
+        if (key := f"deltilkobling {number}") in found
+    }
+    if numbered:
+        if "1" in numbered:
+            mapping["home"] = numbered["1"]
+        if "2" in numbered:
+            mapping["night"] = numbered["2"]
+        if "3" in numbered:
+            mapping["custom"] = numbered["3"]
+    elif "deltilkobling" in found:
+        mapping["home"] = found["deltilkobling"]
+    return mapping
+
+
+def is_camera(device_type: str) -> bool:
+    """Return True for PIR cameras ('PIR m. kamera')."""
+    value = device_type.casefold()
+    return "kamera" in value or "camera" in value
+
+
+def is_dimmer(device_type: str) -> bool:
+    value = device_type.casefold()
+    return "dæmper" in value or "dimmer" in value
+
+
+def is_cover(device_type: str) -> bool:
+    value = device_type.casefold()
+    return any(word in value for word in ("gardin", "rulle", "jalousi", "markise", "shutter"))

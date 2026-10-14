@@ -84,6 +84,32 @@ def visible_text(html: str) -> str:
     return "\n".join(_clean(part) for part in parser.parts if _clean(part))
 
 
+def _fault_rows(html: str) -> tuple[str, ...] | None:
+    """Return one text per row of the "Aktive fejl" table, or None if absent.
+
+    A row is a fault and the zone it belongs to, for example
+    "Zone18 (Garageport): Sensortjek fejl".
+    """
+    parser = _TableParser()
+    parser.feed(html)
+    for table in parser.tables:
+        if not table or not table[0] or table[0][0].casefold() != "aktive fejl":
+            continue
+        faults = []
+        for row in table[1:]:
+            cells = [cell for cell in row if cell]
+            if not cells or "ingen enheder fundet" in " ".join(cells).casefold():
+                continue
+            zones = [cell for cell in cells if re.match(r"zone\s*\d+", cell, re.I)]
+            others = [cell for cell in cells if cell not in zones]
+            if zones and others:
+                faults.append(f"{zones[0]}: {' – '.join(others)}")
+            else:
+                faults.append(" – ".join(cells))
+        return tuple(faults)
+    return None
+
+
 def parse_control_page(html: str) -> tuple[str, tuple[str, ...]]:
     """Parse alarm state and active faults from control.htm."""
     text = visible_text(html)
@@ -92,18 +118,31 @@ def parse_control_page(html: str) -> tuple[str, tuple[str, ...]]:
         raise ValueError("Panel state was not found in control.htm")
 
     state = _clean(state_match.group(1))
-    faults: tuple[str, ...] = ()
-    fault_match = re.search(
-        r"Aktive fejl\s*(.*?)(?:©|$)", text, re.IGNORECASE | re.DOTALL
-    )
-    if fault_match:
-        values = [
-            line.strip()
-            for line in fault_match.group(1).splitlines()
-            if line.strip() and "Ingen enheder fundet" not in line
-        ]
-        faults = tuple(values)
+    faults = _fault_rows(html)
+    if faults is None:
+        faults = ()
+        fault_match = re.search(
+            r"Aktive fejl\s*(.*?)(?:©|$)", text, re.IGNORECASE | re.DOTALL
+        )
+        if fault_match:
+            faults = tuple(
+                line.strip()
+                for line in fault_match.group(1).splitlines()
+                if line.strip() and "Ingen enheder fundet" not in line
+            )
     return state, faults
+
+
+def parse_control_buttons(html: str) -> tuple[str, ...]:
+    """Return the arm/disarm button texts on control.htm, e.g. 'Deltilkobling 2'."""
+    return tuple(
+        _clean(value)
+        for value in re.findall(
+            r'<input[^>]*name="S"[^>]*value="([^"]+)"[^>]*type=submit',
+            html,
+            re.IGNORECASE,
+        )
+    )
 
 
 def parse_device_page(html: str) -> dict[int, PanelDevice]:
@@ -201,6 +240,10 @@ class PanelData:
     settings: AreaSettings | None = None
     panel_clock: str | None = None
     clock_offset: int | None = None
+    commands: tuple[str, ...] = ()
+    captures: tuple[Capture, ...] = ()
+    panel_settings: PanelSettings | None = None
+    gsm_details: tuple[tuple[str, str], ...] = ()
 
 
 def _find_table(html: str, *required: str) -> list[list[str]] | None:
@@ -370,3 +413,110 @@ def parse_panel_clock(html: str) -> str | None:
         parts.append(int(match.group(1)))
     year, month, day, hour, minute = parts
     return f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}"
+
+
+@dataclass(frozen=True, slots=True)
+class Capture:
+    """A row on Billeder/Video (capevent.htm) from a PIR camera."""
+
+    time: str
+    device: str = ""
+    kind: str = ""
+    status: str = ""
+    zone: int | None = None
+    links: tuple[str, ...] = ()
+
+
+class _RowLinkParser(HTMLParser):
+    """Collect cell texts plus link and image addresses for every table row."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[tuple[list[str], list[str]]] = []
+        self._cells: list[str] | None = None
+        self._links: list[str] = []
+        self._cell: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        values = dict(attrs)
+        if tag == "tr":
+            self._cells, self._links = [], []
+        elif tag in ("td", "th") and self._cells is not None:
+            self._cell = []
+        elif self._cells is not None and tag in ("a", "img", "source", "video", "embed"):
+            for key in ("href", "src", "data"):
+                if values.get(key):
+                    self._links.append(values[key])
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in ("td", "th") and self._cell is not None and self._cells is not None:
+            self._cells.append(_clean("".join(self._cell)))
+            self._cell = None
+        elif tag == "tr" and self._cells is not None:
+            self.rows.append((self._cells, self._links))
+            self._cells = None
+
+
+def parse_capture_page(html: str) -> tuple[Capture, ...]:
+    """Parse the newest pictures/videos from capevent.htm, newest first."""
+    parser = _RowLinkParser()
+    parser.feed(html)
+    captures = []
+    for cells, links in parser.rows:
+        if not cells or not re.match(r"\d{4}-\d{2}-\d{2}", cells[0]):
+            continue
+        cells = cells + [""] * (4 - len(cells))
+        captures.append(
+            Capture(
+                time=cells[0],
+                device=cells[1],
+                kind=cells[2],
+                status=cells[3],
+                zone=_zone_from_device(cells[1]),
+                links=tuple(dict.fromkeys(link for link in links if link)),
+            )
+        )
+    return tuple(captures)
+
+
+def parse_gsm_details(html: str) -> tuple[tuple[str, str], ...]:
+    """Return every 'label: value' row on gsm.htm (status, signal, operator, ...)."""
+    return tuple(_key_values(html).items())
+
+
+@dataclass(frozen=True, slots=True)
+class PanelSettings:
+    """Settings from panel.htm used by the integration."""
+
+    checkin_interval: int = 0  # seconds, 0 = not active
+    temperature_high: int | None = None  # °C, None = not active
+    temperature_low: int | None = None
+
+
+def _selected_row(html: str, label: str) -> list[str]:
+    for row in re.findall(r"<tr>(.*?)</tr>", html, re.S | re.I):
+        cell = _clean(re.sub(r"<[^>]+>", "", row.split("</td>", 1)[0])).casefold()
+        if cell.startswith(label):
+            return _selected_texts(row)
+    return []
+
+
+def _temperature_limit(texts: list[str]) -> int | None:
+    match = re.search(r"(-?\d+)\s*°", texts[0]) if texts else None
+    return int(match.group(1)) if match else None
+
+
+def parse_panel_page(html: str) -> PanelSettings:
+    """Parse the auto check-in interval and temperature alarm limits."""
+    checkin = _selected_row(html, "auto check-in")
+    return PanelSettings(
+        checkin_interval=_duration(checkin[0]) if checkin else 0,
+        temperature_high=_temperature_limit(_selected_row(html, "høj temperatur")),
+        temperature_low=_temperature_limit(_selected_row(html, "lav temperatur")),
+    )

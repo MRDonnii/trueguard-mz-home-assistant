@@ -23,6 +23,8 @@ from .const import (
     PLATFORMS,
 )
 from .coordinator import TrueGuardCoordinator
+from .entity import panel_device_info
+from .events import is_camera, is_cover, is_dimmer
 from .receiver import ReportReceiver
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,6 +37,8 @@ class TrueGuardRuntimeData:
     client: TrueGuardClient
     coordinator: TrueGuardCoordinator
     receiver: ReportReceiver | None = None
+    panel_device_id: str | None = None
+    platforms: tuple[str, ...] = ()
 
 
 async def async_migrate_entry(
@@ -72,11 +76,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = TrueGuardCoordinator(hass, entry, client)
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = TrueGuardRuntimeData(client, coordinator)
+    # Register the panel first, so zone devices can point at it by device id.
+    entry.runtime_data.panel_device_id = (
+        dr.async_get(hass)
+        .async_get_or_create(
+            config_entry_id=entry.entry_id, **panel_device_info(entry, coordinator)
+        )
+        .id
+    )
+    await coordinator.async_load_last_backup()
     if entry.options.get(CONF_RECEIVER):
         entry.runtime_data.receiver = await _async_start_receiver(
             hass, entry, coordinator
         )
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.runtime_data.platforms = _platforms(coordinator)
+    await hass.config_entries.async_forward_entry_setups(
+        entry, entry.runtime_data.platforms
+    )
     known_zones = set(coordinator.data.devices)
 
     @callback
@@ -89,9 +105,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
         registry = dr.async_get(hass)
         for zone, device in devices.items():
-            device_entry = registry.async_get_device(
-                identifiers={(DOMAIN, f"{entry.entry_id}_zone_{zone}")}
-            )
+            device_entry = _zone_device(registry, entry, zone)
             if device_entry is None:
                 continue
             if device_entry.name != device.name or device_entry.model != device.device_type:
@@ -101,6 +115,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.async_on_unload(coordinator.async_add_listener(_async_follow_panel))
     return True
+
+
+def _platforms(coordinator: TrueGuardCoordinator) -> tuple[str, ...]:
+    """Load camera, light, and cover only when the panel has such devices."""
+    types = [device.device_type for device in coordinator.data.devices.values()]
+    optional = {
+        "camera": any(is_camera(kind) for kind in types),
+        "light": any(is_dimmer(kind) for kind in types),
+        "cover": any(is_cover(kind) for kind in types),
+    }
+    return tuple(
+        platform for platform in PLATFORMS if optional.get(platform, True)
+    )
+
+
+def _zone_device(
+    registry: dr.DeviceRegistry, entry: ConfigEntry, zone: int
+) -> dr.DeviceEntry | None:
+    """Find a zone device; async_get_device is deprecated from HA 2026.8."""
+    identifier = (DOMAIN, f"{entry.entry_id}_zone_{zone}")
+    if hasattr(registry, "async_get_device_by_identifier"):
+        return registry.async_get_device_by_identifier(identifier, entry.entry_id)
+    return registry.async_get_device(identifiers={identifier})
 
 
 async def _async_start_receiver(
@@ -134,7 +171,9 @@ async def _async_start_receiver(
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(
+        entry, entry.runtime_data.platforms
+    )
     if unloaded and (receiver := entry.runtime_data.receiver) is not None:
         await receiver.async_stop()
     return unloaded
