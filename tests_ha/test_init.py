@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 
 from custom_components.trueguard_mz.const import DOMAIN, EVENT_TRUEGUARD
 from custom_components.trueguard_mz.diagnostics import (
@@ -47,16 +50,44 @@ INDEX = """<table><tr><td>Firmware revision:</td><td>MZ-TEST 1.0</td></tr>
 GSM = "<table><tr><td>Status:</td><td>SIM ikke monteret</td></tr></table>"
 
 
-def _mock_pages(aioclient_mock, history=HISTORY):
+def _select(name, value, text):
+    return f'<select name="{name}"><option value="0">Ikke aktiv</option><option value="{value}" selected>{text}</option></select>'
+
+
+AREA = (
+    "<table>"
+    f"<tr><td>Indgangstid1:</td><td>Fuldsikring:{_select('a', 20, '20 sek')} Deltilkobling:{_select('b', 10, '10 sek')}</td></tr>"
+    f"<tr><td>Udgangstid:</td><td>Fuldsikring:{_select('c', 30, '30 sek')} Deltilkobling:{_select('d', 10, '10 sek')}</td></tr>"
+    f"<tr><td>Sirene tid:</td><td>{_select('e', 3, '3 min')}</td></tr>"
+    f"<tr><td>Supervision timer:</td><td>{_select('f', 240, '4 timer')}</td></tr>"
+    "</table>"
+)
+
+
+def _panel_page(clock="2026-01-02 12:00"):
+    date, time = clock.split()
+    y, mo, d = date.split("-")
+    h, mi = time.split(":")
+    return "".join(
+        f'<select name="{n}"><option value="{int(v)}" selected>{v}</option></select>'
+        for n, v in (("Y", y), ("M", mo), ("D", d), ("E", h), ("F", mi))
+    )
+
+
+def _mock_pages(aioclient_mock, history=HISTORY, **pages):
     aioclient_mock.clear_requests()
-    for page, body in (
-        ("control.htm", CONTROL),
-        ("device.htm", DEVICE),
-        ("history.htm", history),
-        ("rptevent.htm", REPORTS),
-        ("index.htm", INDEX),
-        ("gsm.htm", GSM),
-    ):
+    bodies = {
+        "control.htm": CONTROL,
+        "device.htm": DEVICE,
+        "history.htm": history,
+        "rptevent.htm": REPORTS,
+        "index.htm": INDEX,
+        "gsm.htm": GSM,
+        "area.htm": AREA,
+        "panel.htm": _panel_page(),
+    }
+    bodies.update({f"{key}.htm": value for key, value in pages.items()})
+    for page, body in bodies.items():
         aioclient_mock.get(f"{HOST}/{page}", text=body)
 
 
@@ -137,13 +168,8 @@ async def test_follows_panel_names_and_zones(hass, aioclient_mock):
     assert registry.async_get_device(identifiers=ident).name == "Hoveddør"
 
     # Renamed on the panel: the device and friendly names follow without a reload.
-    aioclient_mock.clear_requests()
     renamed = DEVICE.replace("Hoveddør", "Fordør")
-    for page, body in (
-        ("control.htm", CONTROL), ("device.htm", renamed), ("history.htm", HISTORY),
-        ("rptevent.htm", REPORTS), ("index.htm", INDEX), ("gsm.htm", GSM),
-    ):
-        aioclient_mock.get(f"{HOST}/{page}", text=body)
+    _mock_pages(aioclient_mock, device=renamed)
     await entry.runtime_data.coordinator.async_refresh()
     await hass.async_block_till_done()
     assert registry.async_get_device(identifiers=ident).name == "Fordør"
@@ -152,17 +178,76 @@ async def test_follows_panel_names_and_zones(hass, aioclient_mock):
     ] == "Fordør Batteri"
 
     # A new zone on the panel: the entry reloads and creates its entities.
-    aioclient_mock.clear_requests()
     added = renamed.replace(
         "</table>",
         "<tr><td>3</td><td>PIR</td><td>Stue</td><td>Indbrud</td><td></td><td></td>"
         "<td></td><td></td><td>5</td><td></td><td>Ændre</td></tr></table>",
     )
-    for page, body in (
-        ("control.htm", CONTROL), ("device.htm", added), ("history.htm", HISTORY),
-        ("rptevent.htm", REPORTS), ("index.htm", INDEX), ("gsm.htm", GSM),
-    ):
-        aioclient_mock.get(f"{HOST}/{page}", text=body)
+    _mock_pages(aioclient_mock, device=added)
     await entry.runtime_data.coordinator.async_refresh()
     await hass.async_block_till_done()
     assert hass.states.get("binary_sensor.stue").attributes["device_class"] == "motion"
+
+
+async def test_countdowns_siren_and_clock(hass, aioclient_mock, freezer):
+    from datetime import timedelta
+
+    freezer.move_to("2026-01-02 12:00:30+01:00")
+    disarmed = CONTROL.replace("Fuldsikring", "Frakoblet")
+    _mock_pages(aioclient_mock, control=disarmed, panel=_panel_page("2026-01-02 12:02"))
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        title="TrueGuard MZ",
+        data={"host": HOST, "username": "u", "password": "p", "scan_interval": 10},
+    )
+    entry.add_to_hass(hass)
+    await hass.config.async_set_time_zone("Europe/Copenhagen")
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data.coordinator
+
+    alarm = hass.states.get("alarm_control_panel.trueguard_mz")
+    assert alarm.state == "disarmed"
+    assert alarm.attributes["siren_time"] == 180
+    assert alarm.attributes["exit_delay"] == 30
+    assert hass.states.get("sensor.trueguard_mz_ur_afvigelse").state == "2"
+
+    # Armed away: the 30 s exit delay shows as arming, then armed_away.
+    _mock_pages(aioclient_mock)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    alarm = hass.states.get("alarm_control_panel.trueguard_mz")
+    assert alarm.state == "arming"
+    assert "countdown_until" in alarm.attributes
+    freezer.tick(timedelta(seconds=31))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert hass.states.get("alarm_control_panel.trueguard_mz").state == "armed_away"
+
+    # The entry door opens: 20 s entry delay shows as pending.
+    _mock_pages(aioclient_mock, device=DEVICE.replace("<td></td><td>Ændre</td></tr>\n<tr><td>2", "<td>Åben</td><td>Ændre</td></tr>\n<tr><td>2", 1))
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.hoveddor").state == "on"
+    assert hass.states.get("alarm_control_panel.trueguard_mz").state == "pending"
+    freezer.tick(timedelta(seconds=21))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert hass.states.get("alarm_control_panel.trueguard_mz").state == "armed_away"
+
+    # A burglary report: triggered for the 3 min siren time, then armed again.
+    burglary = REPORTS.replace(
+        "<tr><td>2026-01-02 09:00:00",
+        "<tr><td>2026-01-02 12:01:30</td><td>Indbrud</td><td>1130</td><td>1</td>"
+        "<td>1</td><td>Færdig</td></tr><tr><td>2026-01-02 09:00:00",
+    )
+    _mock_pages(aioclient_mock, rptevent=burglary)
+    coordinator._events_read_at = None
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get("alarm_control_panel.trueguard_mz").state == "triggered"
+    freezer.move_to("2026-01-02 12:04:40+01:00")
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert hass.states.get("alarm_control_panel.trueguard_mz").state == "armed_away"

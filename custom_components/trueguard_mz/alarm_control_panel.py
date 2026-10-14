@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.components.alarm_control_panel import (
@@ -10,14 +11,23 @@ from homeassistant.components.alarm_control_panel import (
     AlarmControlPanelState,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
 from .const import COMMAND_ARM_AWAY, COMMAND_ARM_HOME, COMMAND_DISARM
 from .coordinator import TrueGuardCoordinator
 from .entity import TrueGuardPanelEntity
-from .events import alarm_is_triggered, last_alarm, last_changed_by, zone_name
+from .events import (
+    ALARM_HOLD,
+    alarm_is_triggered,
+    arm_mode,
+    exit_delay,
+    last_alarm,
+    last_changed_by,
+    zone_name,
+)
 
 
 async def async_setup_entry(
@@ -59,6 +69,23 @@ class TrueGuardAlarm(TrueGuardPanelEntity, AlarmControlPanelEntity):
 
     def __init__(self, coordinator: TrueGuardCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry, "alarm")
+        self._cancel_timer: CALLBACK_TYPE | None = None
+
+    def _hold(self) -> timedelta:
+        """How long a reported alarm counts as triggered: the panel's siren time."""
+        settings = self.coordinator.data.settings
+        if settings and settings.siren:
+            return timedelta(seconds=settings.siren)
+        return ALARM_HOLD
+
+    def _countdown(self) -> tuple[AlarmControlPanelState, datetime] | None:
+        """Return the running exit or entry countdown, if any."""
+        now = dt_util.utcnow()
+        if (until := self.coordinator.arming_until) and now < until:
+            return AlarmControlPanelState.ARMING, until
+        if (until := self.coordinator.entry_until) and now < until:
+            return AlarmControlPanelState.PENDING, until
+        return None
 
     @property
     def alarm_state(self) -> AlarmControlPanelState | None:
@@ -72,9 +99,52 @@ class TrueGuardAlarm(TrueGuardPanelEntity, AlarmControlPanelEntity):
             AlarmControlPanelState.PENDING,
         )
         now = dt_util.now().replace(tzinfo=None)
-        if alarm_is_triggered(data, now, armed):
+        if alarm_is_triggered(data, now, armed, self._hold()):
             return AlarmControlPanelState.TRIGGERED
+        if armed and (countdown := self._countdown()):
+            return countdown[0]
         return state
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        super()._handle_coordinator_update()
+        self._schedule_countdown_end()
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(self._cancel_countdown_timer)
+
+    @callback
+    def _cancel_countdown_timer(self) -> None:
+        if self._cancel_timer:
+            self._cancel_timer()
+            self._cancel_timer = None
+
+    @callback
+    def _schedule_countdown_end(self) -> None:
+        """Write the state again when a countdown or a siren hold runs out."""
+        self._cancel_countdown_timer()
+        delays = []
+        if countdown := self._countdown():
+            delays.append((countdown[1] - dt_util.utcnow()).total_seconds())
+        if self.alarm_state is AlarmControlPanelState.TRIGGERED and (
+            alarm := last_alarm(self.coordinator.data)
+        ):
+            when = dt_util.parse_datetime(alarm.time)
+            if when is not None:
+                end = when + self._hold() - dt_util.now().replace(tzinfo=None)
+                delays.append(end.total_seconds())
+        delays = [delay for delay in delays if delay > 0]
+        if delays:
+            self._cancel_timer = async_call_later(
+                self.hass, min(delays) + 0.5, self._async_timer_done
+            )
+
+    @callback
+    def _async_timer_done(self, _now: datetime) -> None:
+        self._cancel_timer = None
+        self.async_write_ha_state()
+        self._schedule_countdown_end()
 
     @property
     def changed_by(self) -> str | None:
@@ -87,6 +157,20 @@ class TrueGuardAlarm(TrueGuardPanelEntity, AlarmControlPanelEntity):
             "panel_state": data.alarm_state,
             "active_faults": list(data.active_faults),
         }
+        if (settings := data.settings) is not None:
+            mode = arm_mode(data.alarm_state) or "away"
+            attributes.update(
+                {
+                    "exit_delay": exit_delay(data, mode),
+                    "entry_delay": settings.entry1_away
+                    if mode == "away"
+                    else settings.entry1_home,
+                    "siren_time": settings.siren,
+                    "supervision": settings.supervision,
+                }
+            )
+        if countdown := self._countdown():
+            attributes["countdown_until"] = countdown[1].isoformat()
         if (alarm := last_alarm(data)) is not None:
             attributes.update(
                 {

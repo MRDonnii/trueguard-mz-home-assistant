@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory
+from homeassistant.const import EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -32,6 +32,7 @@ async def async_setup_entry(
         TrueGuardLastEventSensor(coordinator, entry),
         TrueGuardLastAlarmSensor(coordinator, entry),
         TrueGuardGsmSensor(coordinator, entry),
+        TrueGuardClockOffsetSensor(coordinator, entry),
     ]
     for zone, device in coordinator.data.devices.items():
         type_name = device.device_type.casefold()
@@ -202,3 +203,29 @@ class TrueGuardGsmSensor(TrueGuardPanelEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {"module": self.coordinator.info.gsm_module or None}
+
+
+class TrueGuardClockOffsetSensor(TrueGuardPanelEntity, SensorEntity):
+    """How far the panel clock is ahead (+) or behind (-) Home Assistant.
+
+    The panel shows its clock to the minute, so the value has a resolution of
+    one minute. Its timestamps drive the alarm-cause logic, so a large offset
+    is worth fixing under Kontrolpanel > Ur/Dato on the panel.
+    """
+
+    _attr_name = "Ur-afvigelse"
+    _attr_icon = "mdi:clock-alert-outline"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "clock_offset")
+
+    @property
+    def native_value(self) -> int | None:
+        return self.coordinator.data.clock_offset
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"panel_clock": self.coordinator.data.panel_clock}

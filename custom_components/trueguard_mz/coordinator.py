@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import asdict, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 import time
 
@@ -12,6 +12,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import TrueGuardAuthError, TrueGuardClient, TrueGuardConnectionError
 from .const import (
@@ -21,8 +22,9 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     EVENT_TRUEGUARD,
     GSM_INTERVAL_SECONDS,
+    SETTINGS_INTERVAL_SECONDS,
 )
-from .events import zone_name
+from .events import arm_mode, entry_delay, exit_delay, zone_is_open, zone_name
 from .parser import LogEntry, PanelData, PanelInfo
 
 _LOGGER = logging.getLogger(__name__)
@@ -50,6 +52,10 @@ class TrueGuardCoordinator(DataUpdateCoordinator[PanelData]):
         )
         self._events_read_at: float | None = None
         self._gsm_read_at: float | None = None
+        self._settings_read_at: float | None = None
+        # Countdowns derived from state changes and the panel's area times.
+        self.arming_until: datetime | None = None
+        self.entry_until: datetime | None = None
         self._seen_log: Counter[LogEntry] | None = None
         super().__init__(
             hass,
@@ -108,9 +114,57 @@ class TrueGuardCoordinator(DataUpdateCoordinator[PanelData]):
             else:
                 self._gsm_read_at = now
 
-        data = replace(data, history=history, reports=reports, gsm_status=gsm_status)
+        settings = previous.settings if previous else None
+        panel_clock = previous.panel_clock if previous else None
+        clock_offset = previous.clock_offset if previous else None
+        if (
+            self._settings_read_at is None
+            or now - self._settings_read_at >= SETTINGS_INTERVAL_SECONDS
+        ):
+            try:
+                settings, panel_clock = await self.client.async_get_settings()
+            except (TrueGuardConnectionError, ValueError) as err:
+                _LOGGER.debug("Could not read TrueGuard settings: %s", err)
+            else:
+                self._settings_read_at = now
+                clock_offset = _clock_offset(panel_clock)
+
+        data = replace(
+            data,
+            history=history,
+            reports=reports,
+            gsm_status=gsm_status,
+            settings=settings,
+            panel_clock=panel_clock,
+            clock_offset=clock_offset,
+        )
+        self._track_countdowns(previous, data)
         self._fire_new_log_entries(data)
         return data
+
+    def _track_countdowns(self, previous: PanelData | None, data: PanelData) -> None:
+        """Start exit and entry countdowns from the panel's area times."""
+        now = dt_util.utcnow()
+        mode = arm_mode(data.alarm_state)
+        if mode is None:
+            self.arming_until = self.entry_until = None
+            return
+        if previous is None:
+            return
+        previous_mode = arm_mode(previous.alarm_state)
+        if previous_mode is None and (delay := exit_delay(data, mode)):
+            self.arming_until = now + timedelta(seconds=delay)
+            self.entry_until = None
+            return
+        if self.arming_until and now < self.arming_until:
+            return
+        if self.entry_until and now < self.entry_until:
+            return
+        for zone in data.devices:
+            if zone_is_open(data, zone) and not zone_is_open(previous, zone):
+                if delay := entry_delay(data, zone, mode):
+                    self.entry_until = now + timedelta(seconds=delay)
+                    return
 
     def _fire_new_log_entries(self, data: PanelData) -> None:
         """Fire one bus event per log row that was not in the previous read."""
@@ -137,3 +191,15 @@ class TrueGuardCoordinator(DataUpdateCoordinator[PanelData]):
                     "config_entry_id": self.config_entry.entry_id,
                 },
             )
+
+
+def _clock_offset(panel_clock: str | None) -> int | None:
+    """Return panel clock minus Home Assistant time, in whole minutes."""
+    if not panel_clock:
+        return None
+    try:
+        panel = datetime.strptime(panel_clock, "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+    local = dt_util.now().replace(tzinfo=None, second=0, microsecond=0)
+    return round((panel - local).total_seconds() / 60)

@@ -30,6 +30,12 @@ and compatible Climax alarm panels with the built-in `WebPanel` interface.
   wireless zone.
 - Panel tamper, 230 V failure, panel battery, and radio jamming sensors.
 - GSM module status and the panel firmware version on the device page.
+- Exit and entry countdowns: the alarm shows `arming` during the panel's exit
+  delay and `pending` during the entry delay of an entry zone, with a
+  `countdown_until` attribute. Delays, siren time, and supervision time are
+  read from the panel and exposed as attributes.
+- **Ur-afvigelse** sensor: how far the panel clock is from Home Assistant, in
+  minutes.
 - Door and window contacts, smoke, CO, heat, gas, glass-break, motion, and
   moisture sensors.
 - On/off modules and diagnostic signal sensors.
@@ -87,7 +93,8 @@ The intervals can be selected during setup and changed later under:
   `history.htm` and `rptevent.htm` are read. They are also read at once when
   the arm state or a zone changes, so the cause of a change shows up quickly.
 
-The GSM page is read every five minutes and `index.htm` once at startup.
+The GSM page is read every five minutes, `area.htm` and `panel.htm` (times and
+clock) every hour, and `index.htm` once at startup.
 
 ## Events and automations
 
@@ -115,7 +122,12 @@ event code.
 - **Triggered**: a burglary alarm keeps the alarm entity triggered while the
   panel is armed, until the panel is armed or disarmed again. Fire, water,
   panic, and other 24-hour alarms are also shown while disarmed, until the zone
-  restores. A reported alarm is never shown as triggered for more than one hour.
+  restores. A reported alarm is shown as triggered for the panel's siren time
+  (one hour if the siren time is not set).
+- **Arming and pending**: after the panel changes from disarmed to armed, the
+  exit delay for that mode shows as `arming`. While armed, opening a zone whose
+  attribute is `Indgang1` or `Indgang2` shows the matching entry delay as
+  `pending`.
 - **Battery, tamper, and supervision**: the device table's own columns win,
   then the panel's active-fault list. Otherwise the newest matching row in the
   report list or event log decides.

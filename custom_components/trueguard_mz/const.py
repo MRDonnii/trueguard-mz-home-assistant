@@ -17,6 +17,9 @@ MAX_EVENT_INTERVAL: Final = 3600
 # The GSM page rarely changes and the panel's web server is small.
 GSM_INTERVAL_SECONDS: Final = 300
 
+# Entry/exit/siren times and the panel clock (area.htm, panel.htm).
+SETTINGS_INTERVAL_SECONDS: Final = 3600
+
 # Fired on the event bus for every new row in the panel's event log.
 EVENT_TRUEGUARD: Final = "trueguard_mz_event"
 

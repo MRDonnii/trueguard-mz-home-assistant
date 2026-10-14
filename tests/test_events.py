@@ -87,6 +87,57 @@ class ParseTests(unittest.TestCase):
         )
 
 
+class SettingsTests(unittest.TestCase):
+    def test_area_page(self):
+        def select(value, text):
+            return (
+                f'<select name="x"><option value="0">Ikke aktiv</option>'
+                f'<option value="{value}" selected>{text}</option></select>'
+            )
+
+        html = (
+            "<table>"
+            f"<tr><td>Indgangstid1:</td><td>Fuldsikring:{select(20, '20 sek')} "
+            f"Deltilkobling:{select(0, 'Ikke aktiv')}</td></tr>"
+            f"<tr><td>Udgangstid:</td><td>Fuldsikring:{select(30, '30 sek')} "
+            f"Deltilkobling:{select(10, '10 sek')}</td></tr>"
+            f"<tr><td>Sirene tid:</td><td>{select(3, '3 min')}</td></tr>"
+            f"<tr><td>Supervision timer:</td><td>{select(240, '4 timer')}</td></tr>"
+            "</table>"
+        )
+        settings = parser.parse_area_page(html)
+        self.assertEqual(settings.entry1_away, 20)
+        self.assertEqual(settings.entry1_home, 0)
+        self.assertEqual(settings.exit_away, 30)
+        self.assertEqual(settings.exit_home, 10)
+        self.assertEqual(settings.siren, 180)
+        self.assertEqual(settings.supervision, 14400)
+
+    def test_panel_clock(self):
+        html = "".join(
+            f'<select name="{name}"><option value="1">1</option>'
+            f'<option value="{value}" selected>{value}</option></select>'
+            for name, value in (("Y", 2026), ("M", 3), ("D", 9), ("E", 7), ("F", 5))
+        )
+        self.assertEqual(parser.parse_panel_clock(html), "2026-03-09 07:05")
+        self.assertIsNone(parser.parse_panel_clock("<p>no clock</p>"))
+
+    def test_entry_delay_uses_zone_attribute(self):
+        settings = parser.AreaSettings(entry1_away=20, entry2_away=40, exit_away=30)
+        devices = {
+            1: parser.PanelDevice(1, "Dørkontakt", "Hoveddør", attribute="Indgang1"),
+            2: parser.PanelDevice(2, "Dørkontakt", "Bagdør", attribute="Indgang2"),
+            3: parser.PanelDevice(3, "PIR", "Stue", attribute="Indbrud"),
+        }
+        data = parser.PanelData("Fuldsikring", devices=devices, settings=settings)
+        self.assertEqual(events.entry_delay(data, 1, "away"), 20)
+        self.assertEqual(events.entry_delay(data, 2, "away"), 40)
+        self.assertEqual(events.entry_delay(data, 3, "away"), 0)
+        self.assertEqual(events.exit_delay(data, "away"), 30)
+        self.assertEqual(events.arm_mode("Deltilkobling"), "home")
+        self.assertIsNone(events.arm_mode("Frakoblet"))
+
+
 class StateTests(unittest.TestCase):
     def setUp(self):
         self.data = parser.PanelData(

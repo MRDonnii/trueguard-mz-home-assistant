@@ -221,13 +221,15 @@ def last_alarm(data: PanelData) -> ReportEvent | None:
     return None
 
 
-def alarm_is_triggered(data: PanelData, now: datetime, armed: bool) -> bool:
+def alarm_is_triggered(
+    data: PanelData, now: datetime, armed: bool, hold: timedelta = ALARM_HOLD
+) -> bool:
     """Return True when a reported alarm is still active.
 
     A burglary alarm stays active until the panel is armed or disarmed again.
     A 24-hour alarm (fire, water, panic, ...) also ends when its zone restores.
-    Either way it ends after ALARM_HOLD, so a missed disarm report cannot keep
-    the entity triggered forever.
+    Either way it ends after `hold` (the panel's siren time when set), so a
+    missed disarm report cannot keep the entity triggered forever.
     """
     since = last_power_up(data)
     for index, event in enumerate(data.reports):
@@ -238,7 +240,7 @@ def alarm_is_triggered(data: PanelData, now: datetime, armed: bool) -> bool:
         if event.qualifier != "1" or event.code not in ALARM_CODES:
             continue
         when = parse_panel_time(event.time)
-        if when is None or now - when > ALARM_HOLD:
+        if when is None or now - when > hold:
             return False
         if event.code in BURGLARY_CODES:
             return armed
@@ -282,3 +284,43 @@ def last_changed_by(data: PanelData) -> str | None:
         if any(word in text for word in ("frakobl", "fuldsikring", "deltilkobl", "tilkobl")):
             return entry.user or entry.device or None
     return None
+
+
+_INACTIVE_STATUS = frozenset({"", "normal", "ok", "luk", "lukket", "closed", "off", "0"})
+
+
+def arm_mode(state_text: str) -> str | None:
+    """Return 'away', 'home', or None (disarmed/unknown) for the panel state text."""
+    value = state_text.casefold()
+    if "fuldsikring" in value:
+        return "away"
+    if "deltilkobl" in value:
+        return "home"
+    return None
+
+
+def zone_is_open(data: PanelData, zone: int) -> bool:
+    """Return True when a zone reports open or active."""
+    device = data.devices.get(zone)
+    return device is not None and device.status.casefold().strip() not in _INACTIVE_STATUS
+
+
+def entry_delay(data: PanelData, zone: int, mode: str) -> int:
+    """Return the entry delay in seconds for an entry zone, 0 for instant zones."""
+    device = data.devices.get(zone)
+    settings = data.settings
+    if device is None or settings is None:
+        return 0
+    attribute = device.attribute.casefold().replace(" ", "")
+    if "indgang2" in attribute:
+        return settings.entry2_away if mode == "away" else settings.entry2_home
+    if "indgang" in attribute:
+        return settings.entry1_away if mode == "away" else settings.entry1_home
+    return 0
+
+
+def exit_delay(data: PanelData, mode: str) -> int:
+    """Return the exit delay in seconds for an arm mode."""
+    if data.settings is None:
+        return 0
+    return data.settings.exit_away if mode == "away" else data.settings.exit_home

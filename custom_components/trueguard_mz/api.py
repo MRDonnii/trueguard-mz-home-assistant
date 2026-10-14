@@ -9,6 +9,7 @@ import aiohttp
 
 from .const import COMMAND_ARM_AWAY, COMMAND_ARM_HOME, COMMAND_DISARM
 from .parser import (
+    AreaSettings,
     LogEntry,
     PanelData,
     PanelInfo,
@@ -17,7 +18,9 @@ from .parser import (
     parse_device_page,
     parse_gsm_page,
     parse_history_page,
+    parse_area_page,
     parse_info_page,
+    parse_panel_clock,
     parse_report_page,
 )
 
@@ -116,6 +119,12 @@ class TrueGuardClient:
     async def async_get_info(self) -> PanelInfo:
         """Read firmware and module versions."""
         return parse_info_page(await self._request("GET", "index.htm"))
+
+    async def async_get_settings(self) -> tuple[AreaSettings, str | None]:
+        """Read entry/exit/siren times (area.htm) and the panel clock (panel.htm)."""
+        area_html = await self._request("GET", "area.htm")
+        panel_html = await self._request("GET", "panel.htm")
+        return parse_area_page(area_html), parse_panel_clock(panel_html)
 
     async def async_get_gsm_status(self) -> str:
         """Read the GSM module status."""

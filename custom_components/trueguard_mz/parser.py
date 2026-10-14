@@ -198,6 +198,9 @@ class PanelData:
     history: tuple[LogEntry, ...] = ()
     reports: tuple[ReportEvent, ...] = ()
     gsm_status: str | None = None
+    settings: AreaSettings | None = None
+    panel_clock: str | None = None
+    clock_offset: int | None = None
 
 
 def _find_table(html: str, *required: str) -> list[list[str]] | None:
@@ -291,3 +294,79 @@ def parse_info_page(html: str) -> PanelInfo:
 def parse_gsm_page(html: str) -> str:
     """Return the GSM module status text from gsm.htm."""
     return _key_values(html).get("status", "")
+
+
+@dataclass(frozen=True, slots=True)
+class AreaSettings:
+    """Timing settings from area.htm, in seconds (0 = not active)."""
+
+    entry1_away: int = 0
+    entry1_home: int = 0
+    entry2_away: int = 0
+    entry2_home: int = 0
+    exit_away: int = 0
+    exit_home: int = 0
+    siren: int = 0
+    supervision: int = 0
+
+
+_UNIT_SECONDS = {"sek": 1, "min": 60, "time": 3600, "timer": 3600}
+
+
+def _duration(text: str) -> int:
+    """Convert option text like '10 sek', '3 min', or '4 timer' to seconds."""
+    match = re.search(r"(\d+)\s*(sek|min|timer|time)", text.casefold())
+    if not match:
+        return 0
+    return int(match.group(1)) * _UNIT_SECONDS[match.group(2)]
+
+
+def _selected_texts(row_html: str) -> list[str]:
+    """Return the selected option text of every select in a table row."""
+    texts = []
+    for select in re.findall(r"<select[^>]*>(.*?)</select>", row_html, re.S | re.I):
+        match = re.search(r"<option[^>]*selected[^>]*>([^<]*)", select, re.I)
+        texts.append(_clean(match.group(1)) if match else "")
+    return texts
+
+
+def parse_area_page(html: str) -> AreaSettings:
+    """Parse entry, exit, siren, and supervision times from area.htm."""
+    values: dict[str, list[int]] = {}
+    for row in re.findall(r"<tr>(.*?)</tr>", html, re.S | re.I):
+        label = _clean(re.sub(r"<[^>]+>", "", row.split("</td>", 1)[0])).casefold()
+        values[label.rstrip(":")] = [_duration(text) for text in _selected_texts(row)]
+
+    def pick(label: str, index: int = 0) -> int:
+        row = values.get(label, [])
+        return row[index] if len(row) > index else 0
+
+    if "sirene tid" not in values:
+        raise ValueError("Area settings were not found in area.htm")
+    return AreaSettings(
+        entry1_away=pick("indgangstid1"),
+        entry1_home=pick("indgangstid1", 1),
+        entry2_away=pick("indgangstid2"),
+        entry2_home=pick("indgangstid2", 1),
+        exit_away=pick("udgangstid"),
+        exit_home=pick("udgangstid", 1),
+        siren=pick("sirene tid"),
+        supervision=pick("supervision timer"),
+    )
+
+
+def parse_panel_clock(html: str) -> str | None:
+    """Return the panel clock from panel.htm as 'YYYY-MM-DD HH:MM', if present."""
+    parts = []
+    for name in ("Y", "M", "D", "E", "F"):
+        select = re.search(
+            rf'<select name="{name}">(.*?)</select>', html, re.S | re.I
+        )
+        if not select:
+            return None
+        match = re.search(r'<option value="(\d+)"[^>]*selected', select.group(1), re.I)
+        if not match:
+            return None
+        parts.append(int(match.group(1)))
+    year, month, day, hour, minute = parts
+    return f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}"
