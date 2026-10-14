@@ -58,7 +58,7 @@ async def _validate(hass: HomeAssistant, data: dict[str, Any]) -> str:
 class TrueGuardConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle setup, discovery, reconfiguration, and reauthentication."""
 
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self) -> None:
         self._discovered_hosts: list[str] = []
@@ -197,7 +197,8 @@ class TrueGuardConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         mac = format_mac(discovery_info.macaddress)
         for entry in self._async_current_entries():
             if (
-                normalize_host(entry.data[CONF_HOST]) == host
+                entry.data.get(CONF_HOST)
+                and normalize_host(entry.data[CONF_HOST]) == host
                 and entry.unique_id is None
             ):
                 self.hass.config_entries.async_update_entry(entry, unique_id=mac)
@@ -261,7 +262,7 @@ class TrueGuardConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=vol.Schema(
-                {vol.Required(CONF_HOST, default=entry.data[CONF_HOST]): str}
+                {vol.Required(CONF_HOST, default=entry.data.get(CONF_HOST, "")): str}
             ),
             errors=errors,
         )

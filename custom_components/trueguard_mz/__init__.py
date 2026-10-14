@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -36,11 +37,19 @@ async def async_migrate_entry(
             unique_id=unique_id,
             version=2,
         )
+    if entry.version == 2:
+        # Version 3 was used by early pre-release builds with the same data
+        # (host, username, password); entries saved by them load unchanged.
+        hass.config_entries.async_update_entry(entry, version=3)
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up TrueGuard MZ from a config entry."""
+    if CONF_HOST not in entry.data:
+        raise ConfigEntryError("The panel address is missing; reconfigure the entry")
+    if CONF_USERNAME not in entry.data or CONF_PASSWORD not in entry.data:
+        raise ConfigEntryAuthFailed("The panel login is missing")
     client = TrueGuardClient(
         async_get_clientsession(hass),
         entry.data[CONF_HOST],

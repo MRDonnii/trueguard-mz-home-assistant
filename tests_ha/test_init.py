@@ -251,3 +251,24 @@ async def test_countdowns_siren_and_clock(hass, aioclient_mock, freezer):
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
     assert hass.states.get("alarm_control_panel.trueguard_mz").state == "armed_away"
+
+
+async def test_migrates_v2_and_loads_v3_entries(hass, aioclient_mock):
+    """Entries saved as version 2 (HACS) or 3 (early builds) both load."""
+    _mock_pages(aioclient_mock)
+    entries = []
+    for version, host in ((2, HOST), (3, HOST)):
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            version=version,
+            title=f"TrueGuard MZ v{version}",
+            data={"host": host, "username": "u", "password": "p"},
+        )
+        entry.add_to_hass(hass)
+        entries.append(entry)
+    # Setting up the first entry loads the integration and with it both entries.
+    assert await hass.config_entries.async_setup(entries[0].entry_id)
+    await hass.async_block_till_done()
+    for entry in entries:
+        assert entry.state.value == "loaded"
+        assert entry.version == 3
