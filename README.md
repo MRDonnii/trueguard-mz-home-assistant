@@ -33,6 +33,8 @@ and compatible Climax alarm panels with the built-in `WebPanel` interface.
 - Door and window contacts, smoke, CO, heat, gas, glass-break, motion, and
   moisture sensors.
 - On/off modules and diagnostic signal sensors.
+- Zone names and types follow the panel: a rename on the panel updates the
+  device in Home Assistant, and added or removed zones reload the integration.
 - Diagnostics download with credentials and MAC address redacted.
 - Local communication only; no cloud account is required.
 - UI setup, reauthentication, reconfiguration, and options flows.

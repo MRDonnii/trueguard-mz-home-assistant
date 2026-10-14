@@ -6,11 +6,12 @@ from dataclasses import dataclass
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import TrueGuardClient
-from .const import PLATFORMS
+from .const import DOMAIN, PLATFORMS
 from .coordinator import TrueGuardCoordinator
 
 
@@ -50,6 +51,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = TrueGuardRuntimeData(client, coordinator)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    known_zones = set(coordinator.data.devices)
+
+    @callback
+    def _async_follow_panel() -> None:
+        """Keep zones and device names in step with the panel's device table."""
+        devices = coordinator.data.devices
+        if set(devices) != known_zones:
+            # A zone was added or removed on the panel: rebuild the entities.
+            hass.config_entries.async_schedule_reload(entry.entry_id)
+            return
+        registry = dr.async_get(hass)
+        for zone, device in devices.items():
+            device_entry = registry.async_get_device(
+                identifiers={(DOMAIN, f"{entry.entry_id}_zone_{zone}")}
+            )
+            if device_entry is None:
+                continue
+            if device_entry.name != device.name or device_entry.model != device.device_type:
+                registry.async_update_device(
+                    device_entry.id, name=device.name, model=device.device_type
+                )
+
+    entry.async_on_unload(coordinator.async_add_listener(_async_follow_panel))
     return True
 
 

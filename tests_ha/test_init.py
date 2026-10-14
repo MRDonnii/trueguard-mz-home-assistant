@@ -116,3 +116,53 @@ async def test_setup_entities_and_events(hass, aioclient_mock):
     assert diagnostics["entry"]["password"] == "**REDACTED**"
     assert diagnostics["info"]["mac"] == "**REDACTED**"
     assert len(diagnostics["history"]) == 3
+
+
+async def test_follows_panel_names_and_zones(hass, aioclient_mock):
+    _mock_pages(aioclient_mock)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        title="TrueGuard MZ",
+        data={"host": HOST, "username": "u", "password": "p", "scan_interval": 10},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    from homeassistant.helpers import device_registry as dr
+
+    registry = dr.async_get(hass)
+    ident = {(DOMAIN, f"{entry.entry_id}_zone_1")}
+    assert registry.async_get_device(identifiers=ident).name == "Hoveddør"
+
+    # Renamed on the panel: the device and friendly names follow without a reload.
+    aioclient_mock.clear_requests()
+    renamed = DEVICE.replace("Hoveddør", "Fordør")
+    for page, body in (
+        ("control.htm", CONTROL), ("device.htm", renamed), ("history.htm", HISTORY),
+        ("rptevent.htm", REPORTS), ("index.htm", INDEX), ("gsm.htm", GSM),
+    ):
+        aioclient_mock.get(f"{HOST}/{page}", text=body)
+    await entry.runtime_data.coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert registry.async_get_device(identifiers=ident).name == "Fordør"
+    assert hass.states.get("binary_sensor.hoveddor_batteri").attributes[
+        "friendly_name"
+    ] == "Fordør Batteri"
+
+    # A new zone on the panel: the entry reloads and creates its entities.
+    aioclient_mock.clear_requests()
+    added = renamed.replace(
+        "</table>",
+        "<tr><td>3</td><td>PIR</td><td>Stue</td><td>Indbrud</td><td></td><td></td>"
+        "<td></td><td></td><td>5</td><td></td><td>Ændre</td></tr></table>",
+    )
+    for page, body in (
+        ("control.htm", CONTROL), ("device.htm", added), ("history.htm", HISTORY),
+        ("rptevent.htm", REPORTS), ("index.htm", INDEX), ("gsm.htm", GSM),
+    ):
+        aioclient_mock.get(f"{HOST}/{page}", text=body)
+    await entry.runtime_data.coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.stue").attributes["device_class"] == "motion"
