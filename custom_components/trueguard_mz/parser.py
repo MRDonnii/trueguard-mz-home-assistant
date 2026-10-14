@@ -23,13 +23,6 @@ class PanelDevice:
     status: str = ""
 
 
-@dataclass(frozen=True, slots=True)
-class PanelData:
-    """A complete polling snapshot."""
-
-    alarm_state: str
-    active_faults: tuple[str, ...] = ()
-    devices: dict[int, PanelDevice] = field(default_factory=dict)
 
 
 class _TableParser(HTMLParser):
@@ -150,3 +143,151 @@ def parse_device_page(html: str) -> dict[int, PanelDevice]:
             return devices
 
     raise ValueError("Device table was not found in device.htm")
+
+
+@dataclass(frozen=True, slots=True)
+class LogEntry:
+    """A row from the panel's event log (history.htm)."""
+
+    time: str
+    device: str = ""
+    user: str = ""
+    event: str = ""
+    zone: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReportEvent:
+    """A row from the panel's report list (rptevent.htm) with its Contact ID."""
+
+    time: str
+    event: str = ""
+    cid: str = ""
+    group: int | None = None
+    zone: int | None = None
+    status: str = ""
+
+    @property
+    def qualifier(self) -> str:
+        """Contact ID qualifier: 1 = new event/disarm, 3 = restore/arm."""
+        return self.cid[:1] if len(self.cid) == 4 else ""
+
+    @property
+    def code(self) -> str:
+        """Three-digit Contact ID event code."""
+        return self.cid[1:] if len(self.cid) == 4 else ""
+
+
+@dataclass(frozen=True, slots=True)
+class PanelInfo:
+    """Static panel information from index.htm."""
+
+    firmware: str = ""
+    zigbee: str = ""
+    gsm_module: str = ""
+    mac: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PanelData:
+    """A complete polling snapshot."""
+
+    alarm_state: str
+    active_faults: tuple[str, ...] = ()
+    devices: dict[int, PanelDevice] = field(default_factory=dict)
+    history: tuple[LogEntry, ...] = ()
+    reports: tuple[ReportEvent, ...] = ()
+    gsm_status: str | None = None
+
+
+def _find_table(html: str, *required: str) -> list[list[str]] | None:
+    """Return the first table whose header row contains all required labels."""
+    parser = _TableParser()
+    parser.feed(html)
+    for table in parser.tables:
+        if not table:
+            continue
+        header = [cell.casefold() for cell in table[0]]
+        if all(label in header for label in required):
+            return table
+    return None
+
+
+def _int_or_none(value: str) -> int | None:
+    match = re.search(r"-?\d+", value)
+    return int(match.group()) if match else None
+
+
+def _zone_from_device(device: str) -> int | None:
+    match = re.match(r"\s*zone\s*(\d+)", device, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def parse_history_page(html: str) -> tuple[LogEntry, ...]:
+    """Parse the event log from history.htm, newest first."""
+    table = _find_table(html, "tid", "enhed", "hændelse")
+    if table is None:
+        raise ValueError("Event table was not found in history.htm")
+    entries = []
+    for row in table[1:]:
+        if len(row) < 4 or not re.match(r"\d{4}-\d{2}-\d{2}", row[0]):
+            continue
+        entries.append(
+            LogEntry(
+                time=row[0],
+                device=row[1],
+                user=row[2],
+                event=row[3],
+                zone=_zone_from_device(row[1]),
+            )
+        )
+    return tuple(entries)
+
+
+def parse_report_page(html: str) -> tuple[ReportEvent, ...]:
+    """Parse reported events with Contact ID codes from rptevent.htm."""
+    table = _find_table(html, "tid", "hændelse", "cid hændelse")
+    if table is None:
+        raise ValueError("Report table was not found in rptevent.htm")
+    events = []
+    for row in table[1:]:
+        if len(row) < 6 or not re.match(r"\d{4}-\d{2}-\d{2}", row[0]):
+            continue
+        events.append(
+            ReportEvent(
+                time=row[0],
+                event=row[1],
+                cid=row[2].strip(),
+                group=_int_or_none(row[3]),
+                zone=_int_or_none(row[4]),
+                status=row[5],
+            )
+        )
+    return tuple(events)
+
+
+def _key_values(html: str) -> dict[str, str]:
+    parser = _TableParser()
+    parser.feed(html)
+    values: dict[str, str] = {}
+    for table in parser.tables:
+        for row in table:
+            if len(row) >= 2 and row[0].endswith(":"):
+                values.setdefault(row[0][:-1].strip().casefold(), row[1])
+    return values
+
+
+def parse_info_page(html: str) -> PanelInfo:
+    """Parse firmware and module versions from index.htm."""
+    values = _key_values(html)
+    return PanelInfo(
+        firmware=values.get("firmware revision", ""),
+        zigbee=values.get("zigbee revision", ""),
+        gsm_module=values.get("gsm revision", ""),
+        mac=values.get("mac adresse", ""),
+    )
+
+
+def parse_gsm_page(html: str) -> str:
+    """Return the GSM module status text from gsm.htm."""
+    return _key_values(html).get("status", "")

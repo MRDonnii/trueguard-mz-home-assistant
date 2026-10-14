@@ -8,7 +8,20 @@ from urllib.parse import urljoin, urlparse
 import aiohttp
 
 from .const import COMMAND_ARM_AWAY, COMMAND_ARM_HOME, COMMAND_DISARM
-from .parser import PanelData, parse_control_page, parse_device_page
+from .parser import (
+    LogEntry,
+    PanelData,
+    PanelInfo,
+    ReportEvent,
+    parse_control_page,
+    parse_device_page,
+    parse_gsm_page,
+    parse_history_page,
+    parse_info_page,
+    parse_report_page,
+)
+
+RETRY_DELAY = 0.3
 
 
 class TrueGuardError(Exception):
@@ -51,6 +64,18 @@ class TrueGuardClient:
     async def _request(
         self, method: str, path: str, data: dict[str, str] | None = None
     ) -> str:
+        """Request a page; read-only GETs are retried once on network errors."""
+        try:
+            return await self._request_once(method, path, data)
+        except TrueGuardConnectionError:
+            if method != "GET":
+                raise
+            await asyncio.sleep(RETRY_DELAY)
+            return await self._request_once(method, path, data)
+
+    async def _request_once(
+        self, method: str, path: str, data: dict[str, str] | None = None
+    ) -> str:
         url = urljoin(f"{self.host}/", path)
         try:
             async with asyncio.timeout(10):
@@ -77,6 +102,24 @@ class TrueGuardClient:
                 "This does not look like a TrueGuard MZ panel"
             )
         parse_control_page(html)
+
+    async def async_get_events(
+        self,
+    ) -> tuple[tuple[LogEntry, ...], tuple[ReportEvent, ...]]:
+        """Read the event log and the Contact ID report list."""
+        history_html, report_html = await asyncio.gather(
+            self._request("GET", "history.htm"),
+            self._request("GET", "rptevent.htm"),
+        )
+        return parse_history_page(history_html), parse_report_page(report_html)
+
+    async def async_get_info(self) -> PanelInfo:
+        """Read firmware and module versions."""
+        return parse_info_page(await self._request("GET", "index.htm"))
+
+    async def async_get_gsm_status(self) -> str:
+        """Read the GSM module status."""
+        return parse_gsm_page(await self._request("GET", "gsm.htm"))
 
     async def async_get_data(self) -> PanelData:
         """Read alarm state and all device states."""

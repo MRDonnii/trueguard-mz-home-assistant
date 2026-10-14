@@ -21,10 +21,14 @@ from .api import (
     normalize_host,
 )
 from .const import (
+    CONF_EVENT_INTERVAL,
     CONF_SCAN_INTERVAL,
+    DEFAULT_EVENT_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    MAX_EVENT_INTERVAL,
     MAX_SCAN_INTERVAL,
+    MIN_EVENT_INTERVAL,
     MIN_SCAN_INTERVAL,
 )
 from .discovery import async_discover_hosts, async_is_webpanel
@@ -33,7 +37,7 @@ from .discovery import async_discover_hosts, async_is_webpanel
 def _scan_interval() -> vol.All:
     """Return the shared polling interval validator."""
     return vol.All(
-        vol.Coerce(int),
+        vol.Coerce(float),
         vol.Range(min=MIN_SCAN_INTERVAL, max=MAX_SCAN_INTERVAL),
     )
 
@@ -306,18 +310,25 @@ class TrueGuardOptionsFlow(config_entries.OptionsFlowWithReload):
     """Configure polling without entering credentials again."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
-        """Set the coordinator polling interval."""
+        """Set the polling and event-log intervals."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
         current = self.config_entry.options.get(
             CONF_SCAN_INTERVAL,
             self.config_entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
         )
+        events = self.config_entry.options.get(
+            CONF_EVENT_INTERVAL, DEFAULT_EVENT_INTERVAL
+        )
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_SCAN_INTERVAL, default=current): _scan_interval()
+                    vol.Required(CONF_SCAN_INTERVAL, default=current): _scan_interval(),
+                    vol.Required(CONF_EVENT_INTERVAL, default=events): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(min=MIN_EVENT_INTERVAL, max=MAX_EVENT_INTERVAL),
+                    ),
                 }
             ),
         )

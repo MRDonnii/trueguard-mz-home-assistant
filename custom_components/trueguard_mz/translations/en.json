@@ -24,7 +24,7 @@
           "scan_interval": "Polling interval (seconds)"
         },
         "data_description": {
-          "scan_interval": "Choose 5-3600 seconds. Very short intervals create more traffic to the panel."
+          "scan_interval": "Choose 0.5-3600 seconds. Very short intervals create more traffic to the panel."
         }
       },
       "manual": {
@@ -37,7 +37,7 @@
           "scan_interval": "Polling interval (seconds)"
         },
         "data_description": {
-          "scan_interval": "Choose 5-3600 seconds. Very short intervals create more traffic to the panel."
+          "scan_interval": "Choose 0.5-3600 seconds. Very short intervals create more traffic to the panel."
         }
       },
       "dhcp_confirm": {
@@ -49,7 +49,7 @@
           "scan_interval": "Polling interval (seconds)"
         },
         "data_description": {
-          "scan_interval": "Choose 5-3600 seconds. Very short intervals create more traffic to the panel."
+          "scan_interval": "Choose 0.5-3600 seconds. Very short intervals create more traffic to the panel."
         }
       },
       "reconfigure": {
@@ -85,10 +85,12 @@
         "title": "TrueGuard MZ polling",
         "description": "Changes are applied immediately by reloading the integration.",
         "data": {
-          "scan_interval": "Polling interval (seconds)"
+          "scan_interval": "Polling interval (seconds)",
+          "event_interval": "Event log interval (seconds)"
         },
         "data_description": {
-          "scan_interval": "Choose 5-3600 seconds. The panel receives two parallel page requests per poll."
+          "scan_interval": "Choose 0.5-3600 seconds. The panel receives two parallel page requests per poll.",
+          "event_interval": "How often the event log and report list (alarm cause, battery, tamper) are read. They are also read at once when the arm state or a zone changes."
         }
       }
     }

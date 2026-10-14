@@ -19,10 +19,21 @@ and compatible Climax alarm panels with the built-in `WebPanel` interface.
 - Active local-network discovery using the `WebPanel` HTTP fingerprint.
 - Manual hostname or IP setup as a fallback.
 - Automatic IP updates when a DHCP-discovered panel changes address.
-- User-selectable polling interval from 5 to 3600 seconds.
+- User-selectable polling interval from 0.5 to 3600 seconds.
 - Alarm control with disarm, full arm (`Fuldtilkoblet`), and partial arm (`Deltilkoblet`).
-- Door and window contacts, smoke, motion, and moisture sensors.
+- Triggered state from the panel's Contact ID report list, with the alarm
+  cause, zone, and time as attributes and a **Seneste alarm** sensor.
+- **Sidste hændelse** sensors for the panel and for every zone, built from the
+  panel's event log.
+- A `trueguard_mz_event` event and a logbook entry for every new log row.
+- Battery, tamper, and supervision (connection) binary sensors for every
+  wireless zone.
+- Panel tamper, 230 V failure, panel battery, and radio jamming sensors.
+- GSM module status and the panel firmware version on the device page.
+- Door and window contacts, smoke, CO, heat, gas, glass-break, motion, and
+  moisture sensors.
 - On/off modules and diagnostic signal sensors.
+- Diagnostics download with credentials and MAC address redacted.
 - Local communication only; no cloud account is required.
 - UI setup, reauthentication, reconfiguration, and options flows.
 
@@ -62,14 +73,49 @@ never sent to a cloud service.
 
 ## Polling interval
 
-The interval can be selected during setup and changed later under:
+The intervals can be selected during setup and changed later under:
 
 **Settings > Devices & services > TrueGuard MZ > Configure**
 
-Supported values are 5-3600 seconds. Each poll downloads `control.htm` and
-`device.htm` in parallel. A short interval gives faster contact updates but
-creates more load on the panel's embedded web server. Start at 5 or 10 seconds
-and increase the value if the panel reports timeouts.
+- **Polling interval** (0.5-3600 seconds): each poll downloads `control.htm`
+  and `device.htm` in parallel. A short interval gives faster contact updates
+  but creates more load on the panel's embedded web server. Start at 5 or 10
+  seconds and increase the value if the panel reports timeouts.
+- **Event log interval** (2-3600 seconds, default 10): how often
+  `history.htm` and `rptevent.htm` are read. They are also read at once when
+  the arm state or a zone changes, so the cause of a change shows up quickly.
+
+The GSM page is read every five minutes and `index.htm` once at startup.
+
+## Events and automations
+
+Every new row in the panel's event log fires a `trueguard_mz_event` event:
+
+```yaml
+trigger:
+  - trigger: event
+    event_type: trueguard_mz_event
+    event_data:
+      event: Lavt batteri
+```
+
+The event data contains `time`, `device`, `user`, `event`, `zone`, `zone_name`,
+and `config_entry_id`. Rows already in the log when Home Assistant starts do
+not fire events.
+
+## How states are derived
+
+The panel reports Contact ID codes in its report list (`rptevent.htm`), for
+example `1130` for a burglary alarm and `3130` for its restore. The first digit
+is the qualifier (1 = new event, 3 = restore) and the last three digits are the
+event code.
+
+- **Triggered**: a burglary alarm keeps the alarm entity triggered while the
+  panel is armed, until the panel is armed or disarmed again. Fire, water,
+  panic, and other 24-hour alarms are also shown while disarmed, until the zone
+  restores. A reported alarm is never shown as triggered for more than one hour.
+- **Battery, tamper, and supervision**: the device table's own columns win.
+  Otherwise the newest matching row in the report list or event log decides.
 
 ## Security
 
@@ -90,6 +136,8 @@ is called.
 - If authentication fails, verify that the same credentials work in the local
   WebPanel.
 - If entities update slowly, reduce the polling interval under **Configure**.
+- Download diagnostics from the integration page to see the parsed device
+  table, event log, and report list.
 - If the panel becomes unstable, increase the interval and check the Home
   Assistant log for `trueguard_mz` messages.
 

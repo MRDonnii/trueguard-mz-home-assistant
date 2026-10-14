@@ -24,7 +24,7 @@
           "scan_interval": "Poll-interval (sekunder)"
         },
         "data_description": {
-          "scan_interval": "Vælg 5-3600 sekunder. Meget korte intervaller giver mere trafik til panelet."
+          "scan_interval": "Vælg 0,5-3600 sekunder. Meget korte intervaller giver mere trafik til panelet."
         }
       },
       "manual": {
@@ -37,7 +37,7 @@
           "scan_interval": "Poll-interval (sekunder)"
         },
         "data_description": {
-          "scan_interval": "Vælg 5-3600 sekunder. Meget korte intervaller giver mere trafik til panelet."
+          "scan_interval": "Vælg 0,5-3600 sekunder. Meget korte intervaller giver mere trafik til panelet."
         }
       },
       "dhcp_confirm": {
@@ -49,7 +49,7 @@
           "scan_interval": "Poll-interval (sekunder)"
         },
         "data_description": {
-          "scan_interval": "Vælg 5-3600 sekunder. Meget korte intervaller giver mere trafik til panelet."
+          "scan_interval": "Vælg 0,5-3600 sekunder. Meget korte intervaller giver mere trafik til panelet."
         }
       },
       "reconfigure": {
@@ -82,13 +82,15 @@
   "options": {
     "step": {
       "init": {
-        "title": "TrueGuard MZ polling",
+        "title": "TrueGuard MZ opdatering",
         "description": "Ændringen anvendes straks ved at genindlæse integrationen.",
         "data": {
-          "scan_interval": "Poll-interval (sekunder)"
+          "scan_interval": "Poll-interval (sekunder)",
+          "event_interval": "Hændelseslog-interval (sekunder)"
         },
         "data_description": {
-          "scan_interval": "Vælg 5-3600 sekunder. Panelet modtager to parallelle sidekald for hvert poll."
+          "scan_interval": "Vælg 0,5-3600 sekunder. Panelet modtager to parallelle sidekald for hvert poll.",
+          "event_interval": "Hvor ofte loggen og rapportlisten (alarmårsag, batteri, sabotage) læses. De læses også straks, når tilstanden eller en zone ændrer sig."
         }
       }
     }
