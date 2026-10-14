@@ -217,6 +217,12 @@ class TrueGuardClient:
             raise ValueError(f"Unsupported module command: {command}")
         await self._device_command(zone, command)
 
+    async def async_set_zone_active(self, zone: int, active: bool) -> None:
+        """Activate a zone or deactivate it, like the device page's buttons."""
+        await self._device_command(
+            zone, "Aktiver enhed" if active else "Deaktiver enhed"
+        )
+
     async def async_set_switch(self, zone: int, turn_on: bool) -> None:
         """Control a panel switch module."""
         command = "Modul tændt" if turn_on else "Modul slukket"

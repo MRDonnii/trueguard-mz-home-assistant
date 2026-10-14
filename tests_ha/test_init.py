@@ -446,4 +446,24 @@ async def test_large_panel_features(hass, aioclient_mock, freezer, tmp_path, soc
     backups = list((tmp_path / "trueguard_mz" / "backups").glob("cfg-*.bin"))
     assert len(backups) == 1 and backups[0].read_bytes() == b"CFGDATA"
     assert get("sensor.trueguard_mz_seneste_backup").state != "unknown"
+
+    # The zone "Aktiv" switch exists but is disabled until the user enables it.
+    from homeassistant.helpers import entity_registry as er
+
+    registry = er.async_get(hass)
+    active = registry.async_get("switch.bryggersdor_aktiv")
+    assert active.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+    assert registry.async_get("switch.garageport_aktiv") is None  # modules have none
+    registry.async_update_entity(active.entity_id, disabled_by=None)
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert get("switch.bryggersdor_aktiv").state == "on"
+    assert get("switch.rog_1st_aktiv") is None  # other zones stay disabled
+
+    aioclient_mock.post(f"{HOST}/device.htm", text=BIG_DEVICE)
+    await hass.services.async_call(
+        "switch", "turn_off", {"entity_id": "switch.bryggersdor_aktiv"}, blocking=True
+    )
+    posted = [call for call in aioclient_mock.mock_calls if call[0] == "POST"]
+    assert posted[-1][2] == {"Z2": "1", "S": "Deaktiver enhed"}
     assert await hass.config_entries.async_unload(entry.entry_id)

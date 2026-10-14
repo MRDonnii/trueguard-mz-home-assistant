@@ -57,6 +57,9 @@ and compatible Climax alarm panels with the built-in `WebPanel` interface.
   Auto check-in.
 - Arm modes follow the panel's buttons: Deltilkobling 1/2/3 become home,
   night, and custom bypass when the panel has them.
+- **Aktiv** switch per detector zone to deactivate or activate it on the panel
+  (the panel's Deaktiver/Aktiver enhed). Disabled by default: enable it per
+  zone in the entity settings. Each change is written to the logbook.
 - **Tag backup** button and an optional monthly backup of the panel
   configuration (`cfg.bin`) under `/config/trueguard_mz/backups` (12 kept).
 - GSM signal sensor when the panel shows one (needs a SIM card).
