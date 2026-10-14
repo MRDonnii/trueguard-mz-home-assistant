@@ -114,8 +114,12 @@ event code.
   panel is armed, until the panel is armed or disarmed again. Fire, water,
   panic, and other 24-hour alarms are also shown while disarmed, until the zone
   restores. A reported alarm is never shown as triggered for more than one hour.
-- **Battery, tamper, and supervision**: the device table's own columns win.
-  Otherwise the newest matching row in the report list or event log decides.
+- **Battery, tamper, and supervision**: the device table's own columns win,
+  then the panel's active-fault list. Otherwise the newest matching row in the
+  report list or event log decides.
+- **Panel restarts**: log and report rows from before the newest panel start
+  ("Enhed tændt") are ignored, because the panel forgets battery, tamper, and
+  alarm states when it restarts.
 
 ## Security
 

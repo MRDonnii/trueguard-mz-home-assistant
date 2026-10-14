@@ -129,6 +129,27 @@ class StateTests(unittest.TestCase):
         )
         self.assertFalse(events.zone_tamper(data, 1))
 
+    def test_panel_restart_clears_old_flags(self):
+        restart = parser.LogEntry("2026-01-02 11:00:00", "", "", "Enhed tændt", None)
+        tamper = parser.LogEntry("2026-01-02 10:59:00", "", "", "Panel sabotage", None)
+        history = (restart, tamper) + self.data.history
+        data = parser.PanelData(
+            "Frakoblet", devices=DEVICES, history=history, reports=self.data.reports
+        )
+        self.assertFalse(events.zone_battery_low(data, 2))
+        self.assertFalse(events.zone_tamper(data, 1))
+        self.assertFalse(events.panel_tamper(data))
+        self.assertEqual(events.last_power_up(data), "2026-01-02 11:00:00")
+
+    def test_active_fault_names_zone(self):
+        data = parser.PanelData(
+            "Frakoblet",
+            active_faults=("Bagdør Lavt batteri",),
+            devices=DEVICES,
+        )
+        self.assertTrue(events.zone_battery_low(data, 2))
+        self.assertFalse(events.zone_battery_low(data, 1))
+
     def test_changed_by_and_last_event(self):
         self.assertEqual(events.last_changed_by(self.data), "Bruger 1")
         self.assertEqual(events.zone_last_event(self.data, 2).event, "Lavt batteri")
@@ -165,6 +186,15 @@ class TriggeredTests(unittest.TestCase):
         self.assertTrue(events.alarm_is_triggered(self.data(fire), self.now, armed=False))
         restored = self.data(report("2026-01-02 11:59:40", "3111", 2), fire)
         self.assertFalse(events.alarm_is_triggered(restored, self.now, armed=False))
+
+    def test_alarm_before_panel_restart_is_over(self):
+        data = parser.PanelData(
+            "Fuldsikring",
+            devices=DEVICES,
+            history=(parser.LogEntry("2026-01-02 11:59:30", "", "", "Enhed tændt", None),),
+            reports=(report("2026-01-02 11:59:00", "1130", 1),),
+        )
+        self.assertFalse(events.alarm_is_triggered(data, self.now, armed=True))
 
     def test_tamper_is_not_an_alarm(self):
         data = self.data(report("2026-01-02 11:59:00", "1383", 1))

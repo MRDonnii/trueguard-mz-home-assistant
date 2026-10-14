@@ -48,11 +48,21 @@ def parse_panel_time(value: str) -> datetime | None:
         return None
 
 
+def last_power_up(data: PanelData) -> str:
+    """Return the time of the newest panel start ("Enhed tændt"), or ""."""
+    for entry in data.history:
+        if not entry.device and entry.event.casefold().startswith("enhed tændt"):
+            return entry.time
+    return ""
+
+
 def _latest_report(
-    reports: tuple[ReportEvent, ...], code: str, zone: int | None
+    reports: tuple[ReportEvent, ...], code: str, zone: int | None, since: str = ""
 ) -> tuple[str, bool] | None:
-    """Return (time, active) for the newest report with this code."""
+    """Return (time, active) for the newest report with this code after `since`."""
     for event in reports:
+        if event.time <= since:
+            break
         if event.code != code:
             continue
         if zone is not None and event.zone != zone:
@@ -63,10 +73,15 @@ def _latest_report(
 
 
 def _latest_log(
-    history: tuple[LogEntry, ...], zone: int | None, words: tuple[str, ...]
+    history: tuple[LogEntry, ...],
+    zone: int | None,
+    words: tuple[str, ...],
+    since: str = "",
 ) -> tuple[str, bool] | None:
     """Return (time, active) for the newest log row; '<text> ok' means restored."""
     for entry in history:
+        if entry.time <= since:
+            break
         if entry.zone != zone:
             continue
         text = entry.event.casefold()
@@ -85,10 +100,10 @@ def _newest(*candidates: tuple[str, bool] | None) -> bool | None:
 
 
 def _latest_status(
-    reports: tuple[ReportEvent, ...], code: str, zone: int | None
+    reports: tuple[ReportEvent, ...], code: str, zone: int | None, since: str = ""
 ) -> bool | None:
     """Return True if the newest report with this code is active, False if restored."""
-    latest = _latest_report(reports, code, zone)
+    latest = _latest_report(reports, code, zone, since)
     return latest[1] if latest else None
 
 
@@ -100,14 +115,36 @@ def _column_flag(value: str) -> bool | None:
     return value not in _OK_WORDS
 
 
+def _fault_mentions(data: PanelData, names: tuple[str, ...], words: tuple[str, ...]) -> bool:
+    """Return True when the panel's active-fault list names one of `names`."""
+    for fault in data.active_faults:
+        text = fault.casefold()
+        if any(name and name.casefold() in text for name in names) and any(
+            word in text for word in words
+        ):
+            return True
+    return False
+
+
 def _zone_flag(
     data: PanelData, zone: int, column: str | None, code: str, words: tuple[str, ...]
 ) -> bool:
+    """Combine the panel's live view with events since the last panel start.
+
+    The device table and the active-fault list are the panel's current view.
+    Log and report rows only count after the newest panel start, because the
+    panel forgets old battery and tamper states when it restarts.
+    """
     if (flag := _column_flag(column or "")) is not None:
         return flag
+    device = data.devices.get(zone)
+    names = (f"zone{zone} ", f"zone {zone} ", device.name if device else "")
+    if _fault_mentions(data, names, words):
+        return True
+    since = last_power_up(data)
     newest = _newest(
-        _latest_report(data.reports, code, zone),
-        _latest_log(data.history, zone, words),
+        _latest_report(data.reports, code, zone, since),
+        _latest_log(data.history, zone, words, since),
     )
     return bool(newest)
 
@@ -130,15 +167,18 @@ def zone_tamper(data: PanelData, zone: int) -> bool:
 
 def zone_supervision_lost(data: PanelData, zone: int) -> bool:
     """Return True when the panel has lost contact with a zone device."""
-    return bool(_latest_status(data.reports, CODE_ZONE_SUPERVISION, zone))
+    return bool(
+        _latest_status(data.reports, CODE_ZONE_SUPERVISION, zone, last_power_up(data))
+    )
 
 
 def panel_tamper(data: PanelData) -> bool:
     """Return True when the panel's own tamper switch is open."""
-    return bool(
+    since = last_power_up(data)
+    return _fault_text(data, "panel sabotage") or bool(
         _newest(
-            _latest_report(data.reports, CODE_PANEL_TAMPER, None),
-            _latest_log(data.history, None, ("panel sabotage",)),
+            _latest_report(data.reports, CODE_PANEL_TAMPER, None, since),
+            _latest_log(data.history, None, ("panel sabotage",), since),
         )
     )
 
@@ -151,7 +191,7 @@ def _fault_text(data: PanelData, *words: str) -> bool:
 
 def panel_ac_failure(data: PanelData) -> bool:
     """Return True when the panel runs without 230 V mains power."""
-    status = _latest_status(data.reports, CODE_AC_LOSS, None)
+    status = _latest_status(data.reports, CODE_AC_LOSS, None, last_power_up(data))
     if status is not None:
         return status
     return _fault_text(data, "230", "strøm", "ac ")
@@ -159,7 +199,7 @@ def panel_ac_failure(data: PanelData) -> bool:
 
 def panel_battery_low(data: PanelData) -> bool:
     """Return True when the panel's backup battery is low."""
-    status = _latest_status(data.reports, CODE_PANEL_LOW_BATTERY, None)
+    status = _latest_status(data.reports, CODE_PANEL_LOW_BATTERY, None, last_power_up(data))
     if status is not None:
         return status
     return _fault_text(data, "panel batteri", "lavt batteri")
@@ -167,7 +207,7 @@ def panel_battery_low(data: PanelData) -> bool:
 
 def panel_jamming(data: PanelData) -> bool:
     """Return True when the panel detects radio jamming."""
-    status = _latest_status(data.reports, CODE_JAMMING, None)
+    status = _latest_status(data.reports, CODE_JAMMING, None, last_power_up(data))
     if status is not None:
         return status
     return _fault_text(data, "jamming", "støj")
@@ -189,7 +229,10 @@ def alarm_is_triggered(data: PanelData, now: datetime, armed: bool) -> bool:
     Either way it ends after ALARM_HOLD, so a missed disarm report cannot keep
     the entity triggered forever.
     """
+    since = last_power_up(data)
     for index, event in enumerate(data.reports):
+        if event.time <= since:
+            return False
         if event.code in ARM_DISARM_CODES:
             return False
         if event.qualifier != "1" or event.code not in ALARM_CODES:
