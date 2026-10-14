@@ -60,6 +60,32 @@ class FrameTests(unittest.TestCase):
         self.assertEqual(report.cid, "1401")
         self.assertEqual(report.zone, 3)
 
+    def test_climax_binary_crc_frame(self):
+        # Captured from a TrueGuard MZ (MZ-8_F 0.0.3.3L): the CRC is two raw
+        # bytes, not four hex digits, and the account has no '#' in the data.
+        frame = (
+            b'\n\xb9*003A"ADM-CID"0008L0#1234[1234|1401 01 001]'
+            b"_21:41:08,10-14-2026\r"
+        )
+        report = receiver.parse_frame(frame)
+        self.assertEqual(report.format, "ADM-CID")
+        self.assertEqual(report.crc_format, "bin")
+        self.assertEqual(report.cid, "1401")
+        self.assertEqual(report.zone, 1)
+        self.assertEqual(report.sequence, "0008")
+        ack = receiver.dc09_ack(report)
+        body = b'"ACK"0008L0#1234[]'
+        self.assertEqual(ack[1:3].hex().upper(), receiver.crc16(body))
+        self.assertEqual(ack[3:7], f"{len(body):04X}".encode())
+        self.assertEqual(ack[7:-1], body)
+
+    def test_bad_crc_is_rejected(self):
+        frame = (
+            b'\n\x00\x00003A"ADM-CID"0008L0#1234[1234|1401 01 001]'
+            b"_21:41:08,10-14-2026\r"
+        )
+        self.assertIsNone(receiver.parse_frame(frame))
+
     def test_encrypted_and_garbage_are_rejected(self):
         self.assertIsNone(receiver.parse_frame(dc09('"*ADM-CID"0001L0#1234[abcdef]')))
         self.assertIsNone(receiver.parse_frame(b"hello"))

@@ -24,8 +24,9 @@ ACK = b"\x06"
 READ_TIMEOUT = 15
 MAX_FRAME = 1024
 
+# SIA DC-09 message after the CRC: 4 hex length digits, then the quoted id.
 _DC09 = re.compile(
-    r'(?P<crc>[0-9A-F]{4})(?P<length>[0-9A-F]{4})"(?P<encrypted>\*)?'
+    r'(?P<length>[0-9A-F]{4})"(?P<encrypted>\*)?'
     r'(?P<type>SIA-DCS|ADM-CID|NULL)"(?P<sequence>\d{4})'
     r"(?P<receiver>R[0-9A-F]{1,6})?(?P<line>L[0-9A-F]{1,6})?"
     r"#?(?P<account>[0-9A-F]{3,16})?\[(?P<content>[^\]]*)\]",
@@ -70,6 +71,7 @@ class PushReport:
 
     format: str  # "ADM-CID", "SIA-DCS", "NULL", or "CID"
     account: str = ""
+    crc_format: str = "hex"  # DC-09 CRC as 4 hex digits, or "bin" (2 raw bytes, Climax)
     qualifier: str = ""
     code: str = ""
     group: int | None = None
@@ -99,12 +101,45 @@ def dc09_ack(frame: PushReport) -> bytes:
 
     Same layout as pysiaalarm (Home Assistant's SIA integration):
     LF, CRC, length, '"ACK"', sequence, receiver, line, '#account', '[]', CR.
+    The CRC uses the same form as the panel's frame: Climax panels send it as
+    two raw bytes instead of four hex digits.
     """
     match = _DC09.search(frame.raw)
     receiver = (match.group("receiver") or "") if match else ""
     line = (match.group("line") or "") if match else ""
-    body = f'"ACK"{frame.sequence}{receiver}{line}#{frame.account}[]'
-    return f"\n{crc16(body.encode())}{len(body):04X}{body}\r".encode("ascii")
+    body = f'"ACK"{frame.sequence}{receiver}{line}#{frame.account}[]'.encode("ascii")
+    crc = crc16(body)
+    crc_bytes = bytes.fromhex(crc) if frame.crc_format == "bin" else crc.encode()
+    return b"\n" + crc_bytes + f"{len(body):04X}".encode() + body + b"\r"
+
+
+def _split_dc09(raw: bytes) -> tuple[str, str] | None:
+    """Return (crc_format, text from the length field on) for a DC-09 frame.
+
+    Accepts the standard four hex CRC digits and the two raw CRC bytes Climax
+    panels send, and checks the CRC and length against the message.
+    """
+    quote = raw.find(b'"')
+    if quote < 4:
+        return None
+    length = raw[quote - 4 : quote]
+    crc = raw[: quote - 4].lstrip(b"\n")
+    message = raw[quote:].rstrip(b"\r\n\x00 ")
+    if len(crc) == 4 and re.fullmatch(rb"[0-9A-Fa-f]{4}", crc):
+        crc_format, sent_crc = "hex", crc.decode().upper()
+    elif len(crc) == 2:
+        crc_format, sent_crc = "bin", crc.hex().upper()
+    else:
+        return None
+    if sent_crc != crc16(message):
+        _LOGGER.warning("TrueGuard report with a bad CRC: %r", raw[:200])
+        return None
+    try:
+        if int(length, 16) != len(message):
+            _LOGGER.debug("TrueGuard report length differs: %r", raw[:200])
+    except ValueError:
+        return None
+    return crc_format, (length + message).decode("ascii", errors="replace")
 
 
 def _int(value: str | None, base: int = 10) -> int | None:
@@ -117,7 +152,10 @@ def _int(value: str | None, base: int = 10) -> int | None:
 def parse_frame(raw: bytes) -> PushReport | None:
     """Parse one received frame; return None for unknown or encrypted data."""
     text = raw.decode("ascii", errors="replace").strip("\n\r\x00 ")
-    if (match := _DC09.search(text)) is not None:
+    crc_format = "hex"
+    if (split := _split_dc09(raw)) is not None:
+        crc_format, text = split
+    if split is not None and (match := _DC09.match(text)) is not None:
         if match.group("encrypted"):
             _LOGGER.warning(
                 "TrueGuard sent an encrypted SIA frame; remove /SES from the report slot"
@@ -129,6 +167,7 @@ def parse_frame(raw: bytes) -> PushReport | None:
         base = {
             "format": kind,
             "account": account,
+            "crc_format": crc_format,
             "sequence": match.group("sequence"),
             "raw": text,
         }
@@ -155,7 +194,7 @@ def parse_frame(raw: bytes) -> PushReport | None:
                     sia_code=sia.group("code"),
                 )
         return PushReport(**base)
-    if (cid := _RAW_CID.search(text)) is not None:
+    if split is None and b'"' not in raw and (cid := _RAW_CID.search(text)) is not None:
         return PushReport(
             format="CID",
             account=cid.group("account").upper(),
