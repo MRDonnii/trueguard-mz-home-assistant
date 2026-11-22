@@ -1,0 +1,325 @@
+"""Event log, report list, and Contact ID tests using synthetic panel HTML."""
+
+from datetime import datetime
+import importlib
+from pathlib import Path
+import sys
+import types
+import unittest
+
+PACKAGE_PATH = Path(__file__).parents[1] / "custom_components" / "trueguard_mz"
+# Load parser.py and events.py without importing Home Assistant.
+package = types.ModuleType("trueguard_pkg")
+package.__path__ = [str(PACKAGE_PATH)]
+sys.modules["trueguard_pkg"] = package
+parser = importlib.import_module("trueguard_pkg.parser")
+events = importlib.import_module("trueguard_pkg.events")
+
+HISTORY = """
+<h1>Hændelser</h1>
+<table class=fm>
+<tr><td>Tid</td><td>Enhed</td><td>Bruger</td><td>Hændelse</td></tr>
+<tr><td>2026-01-02 10:00:05</td><td></td><td></td><td>Panel sabotage ok</td></tr>
+<tr><td>2026-01-02 10:00:00</td><td></td><td></td><td>Panel sabotage</td></tr>
+<tr><td>2026-01-02 09:00:00</td><td>Zone1 (Hoveddør)</td><td></td><td>Sabotage</td></tr>
+<tr><td>2026-01-02 08:00:00</td><td>Zone2 (Bagdør)</td><td></td><td>Lavt batteri</td></tr>
+<tr><td>2026-01-02 07:00:00</td><td></td><td>Bruger 1</td><td>Frakoblet</td></tr>
+</table>
+"""
+
+REPORTS = """
+<h1>Rapport hændelser</h1>
+<table class=fm>
+<tr><td>Tid</td><td>Hændelse</td><td>CID hændelse</td><td>Gruppe</td>
+<td>Zone / Bruger</td><td>Status</td></tr>
+<tr><td>2026-01-02 10:00:05</td><td>Panel sabotage ok</td><td>3137</td><td>0</td><td>0</td><td>Færdig</td></tr>
+<tr><td>2026-01-02 10:00:00</td><td>Panel sabotage</td><td>1137</td><td>0</td><td>0</td><td>Færdig</td></tr>
+<tr><td>2026-01-02 09:00:00</td><td>Sabotage</td><td>1383</td><td>1</td><td>1</td><td>Færdig</td></tr>
+<tr><td>2026-01-02 08:00:00</td><td>Batteri lav</td><td>1384</td><td>1</td><td>2</td><td>Færdig</td></tr>
+</table>
+"""
+
+DEVICES = {
+    1: parser.PanelDevice(zone=1, device_type="Dørkontakt", name="Hoveddør"),
+    2: parser.PanelDevice(zone=2, device_type="Dørkontakt", name="Bagdør"),
+}
+
+
+def report(time, cid, zone, event="x"):
+    return parser.ReportEvent(time=time, event=event, cid=cid, group=1, zone=zone)
+
+
+class ParseTests(unittest.TestCase):
+    def test_history(self):
+        rows = parser.parse_history_page(HISTORY)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(rows[2].zone, 1)
+        self.assertEqual(rows[2].event, "Sabotage")
+        self.assertIsNone(rows[0].zone)
+        self.assertEqual(rows[4].user, "Bruger 1")
+
+    def test_reports(self):
+        rows = parser.parse_report_page(REPORTS)
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(rows[3].cid, "1384")
+        self.assertEqual(rows[3].qualifier, "1")
+        self.assertEqual(rows[3].code, "384")
+        self.assertEqual(rows[3].zone, 2)
+
+    def test_empty_report_page(self):
+        html = """<table class=fm><tr><td>Tid</td><td>Hændelse</td>
+        <td>CID hændelse</td><td>Gruppe</td><td>Zone / Bruger</td><td>Status</td></tr>
+        <tr><td colspan=6>Ingen enheder fundet</td></tr></table>"""
+        self.assertEqual(parser.parse_report_page(html), ())
+
+    def test_info_and_gsm(self):
+        info = parser.parse_info_page(
+            "<table><tr><td>Firmware revision:</td><td>MZ-8_F 1.0</td></tr>"
+            "<tr><td>ZigBee revision:</td><td>3.4</td></tr></table>"
+        )
+        self.assertEqual(info.firmware, "MZ-8_F 1.0")
+        self.assertEqual(info.zigbee, "3.4")
+        self.assertEqual(
+            parser.parse_gsm_page(
+                "<table><tr><td>Status:</td><td>SIM ikke monteret </td></tr></table>"
+            ),
+            "SIM ikke monteret",
+        )
+
+
+class SettingsTests(unittest.TestCase):
+    def test_area_page(self):
+        def select(value, text):
+            return (
+                f'<select name="x"><option value="0">Ikke aktiv</option>'
+                f'<option value="{value}" selected>{text}</option></select>'
+            )
+
+        html = (
+            "<table>"
+            f"<tr><td>Indgangstid1:</td><td>Fuldsikring:{select(20, '20 sek')} "
+            f"Deltilkobling:{select(0, 'Ikke aktiv')}</td></tr>"
+            f"<tr><td>Udgangstid:</td><td>Fuldsikring:{select(30, '30 sek')} "
+            f"Deltilkobling:{select(10, '10 sek')}</td></tr>"
+            f"<tr><td>Sirene tid:</td><td>{select(3, '3 min')}</td></tr>"
+            f"<tr><td>Supervision timer:</td><td>{select(240, '4 timer')}</td></tr>"
+            "</table>"
+        )
+        settings = parser.parse_area_page(html)
+        self.assertEqual(settings.entry1_away, 20)
+        self.assertEqual(settings.entry1_home, 0)
+        self.assertEqual(settings.exit_away, 30)
+        self.assertEqual(settings.exit_home, 10)
+        self.assertEqual(settings.siren, 180)
+        self.assertEqual(settings.supervision, 14400)
+
+    def test_panel_clock(self):
+        html = "".join(
+            f'<select name="{name}"><option value="1">1</option>'
+            f'<option value="{value}" selected>{value}</option></select>'
+            for name, value in (("Y", 2026), ("M", 3), ("D", 9), ("E", 7), ("F", 5))
+        )
+        self.assertEqual(parser.parse_panel_clock(html), "2026-03-09 07:05")
+        self.assertIsNone(parser.parse_panel_clock("<p>no clock</p>"))
+
+    def test_entry_delay_uses_zone_attribute(self):
+        settings = parser.AreaSettings(entry1_away=20, entry2_away=40, exit_away=30)
+        devices = {
+            1: parser.PanelDevice(1, "Dørkontakt", "Hoveddør", attribute="Indgang1"),
+            2: parser.PanelDevice(2, "Dørkontakt", "Bagdør", attribute="Indgang2"),
+            3: parser.PanelDevice(3, "PIR", "Stue", attribute="Indbrud"),
+        }
+        data = parser.PanelData("Fuldsikring", devices=devices, settings=settings)
+        self.assertEqual(events.entry_delay(data, 1, "away"), 20)
+        self.assertEqual(events.entry_delay(data, 2, "away"), 40)
+        self.assertEqual(events.entry_delay(data, 3, "away"), 0)
+        self.assertEqual(events.exit_delay(data, "away"), 30)
+        self.assertEqual(events.arm_mode("Deltilkobling"), "home")
+        self.assertIsNone(events.arm_mode("Frakoblet"))
+
+
+class StateTests(unittest.TestCase):
+    def setUp(self):
+        self.data = parser.PanelData(
+            alarm_state="Frakoblet",
+            devices=DEVICES,
+            history=parser.parse_history_page(HISTORY),
+            reports=parser.parse_report_page(REPORTS),
+        )
+
+    def test_zone_flags(self):
+        self.assertTrue(events.zone_tamper(self.data, 1))
+        self.assertFalse(events.zone_tamper(self.data, 2))
+        self.assertTrue(events.zone_battery_low(self.data, 2))
+        self.assertFalse(events.zone_battery_low(self.data, 1))
+        self.assertFalse(events.zone_supervision_lost(self.data, 1))
+
+    def test_panel_tamper_restored(self):
+        self.assertFalse(events.panel_tamper(self.data))
+
+    def test_column_overrides_reports(self):
+        devices = {
+            2: parser.PanelDevice(
+                zone=2, device_type="Dørkontakt", name="Bagdør", battery="OK"
+            )
+        }
+        data = parser.PanelData("Frakoblet", devices=devices, reports=self.data.reports)
+        self.assertFalse(events.zone_battery_low(data, 2))
+
+    def test_log_fallback_without_reports(self):
+        data = parser.PanelData("Frakoblet", devices=DEVICES, history=self.data.history)
+        self.assertTrue(events.zone_battery_low(data, 2))
+        self.assertTrue(events.zone_tamper(data, 1))
+
+    def test_newer_log_restore_beats_older_report(self):
+        history = (
+            parser.LogEntry("2026-01-02 09:30:00", "Zone1 (Hoveddør)", "", "Sabotage ok", 1),
+        ) + self.data.history
+        data = parser.PanelData(
+            "Frakoblet", devices=DEVICES, history=history, reports=self.data.reports
+        )
+        self.assertFalse(events.zone_tamper(data, 1))
+
+    def test_panel_restart_clears_old_flags(self):
+        restart = parser.LogEntry("2026-01-02 11:00:00", "", "", "Enhed tændt", None)
+        tamper = parser.LogEntry("2026-01-02 10:59:00", "", "", "Panel sabotage", None)
+        history = (restart, tamper) + self.data.history
+        data = parser.PanelData(
+            "Frakoblet", devices=DEVICES, history=history, reports=self.data.reports
+        )
+        self.assertFalse(events.zone_battery_low(data, 2))
+        self.assertFalse(events.zone_tamper(data, 1))
+        self.assertFalse(events.panel_tamper(data))
+        self.assertEqual(events.last_power_up(data), "2026-01-02 11:00:00")
+
+    def test_active_fault_names_zone(self):
+        data = parser.PanelData(
+            "Frakoblet",
+            active_faults=("Bagdør Lavt batteri",),
+            devices=DEVICES,
+        )
+        self.assertTrue(events.zone_battery_low(data, 2))
+        self.assertFalse(events.zone_battery_low(data, 1))
+
+    def test_changed_by_and_last_event(self):
+        self.assertEqual(events.last_changed_by(self.data), "Bruger 1")
+        self.assertEqual(events.zone_last_event(self.data, 2).event, "Lavt batteri")
+        self.assertEqual(
+            events.describe(self.data.history[2]), "Zone1 (Hoveddør): Sabotage"
+        )
+
+
+class LargePanelTests(unittest.TestCase):
+    def test_bypass_lasts_until_disarm(self):
+        reports = (
+            report("2026-01-02 11:00:00", "1570", 25),
+            report("2026-01-02 10:59:59", "3456", 1),
+        )
+        data = parser.PanelData("Deltilkobling", devices=DEVICES, reports=reports)
+        self.assertEqual(events.zone_bypassed(data, 25), "Zone bypass")
+        disarmed = parser.PanelData(
+            "Frakoblet",
+            devices=DEVICES,
+            reports=(report("2026-01-02 12:00:00", "1401", 1), *reports),
+        )
+        self.assertIsNone(events.zone_bypassed(disarmed, 25))
+
+    def test_permanent_deactivation_from_device_table(self):
+        devices = {5: parser.PanelDevice(5, "Røgsensor", "Røg", disabled="Permanent deaktiver")}
+        data = parser.PanelData("Frakoblet", devices=devices)
+        self.assertEqual(events.zone_bypassed(data, 5), "Permanent deaktiver")
+
+    def test_zone_fault_sources(self):
+        devices = {
+            18: parser.PanelDevice(18, "Tænd/sluk modul", "Garageport", condition="Funktionsfejl"),
+            3: parser.PanelDevice(3, "Dørkontakt", "Dør"),
+        }
+        data = parser.PanelData(
+            "Frakoblet", devices=devices, active_faults=("Zone3 (Dør): Sensortjek fejl",)
+        )
+        self.assertEqual(events.zone_fault(data, 18), "Funktionsfejl")
+        self.assertEqual(events.zone_fault(data, 3), "Zone3 (Dør): Sensortjek fejl")
+
+    def test_reporting_failed_skips_pending(self):
+        pending = parser.ReportEvent("2026-01-02 11:00:00", cid="1401", status="Venter på rapport")
+        failed = parser.ReportEvent("2026-01-02 10:00:00", cid="1401", status="Færdig(Ingen forbindelse)")
+        ok = parser.ReportEvent("2026-01-02 09:00:00", cid="1401", status="Færdig")
+        self.assertTrue(events.reporting_failed(parser.PanelData("x", reports=(pending, failed))))
+        self.assertFalse(events.reporting_failed(parser.PanelData("x", reports=(ok, failed))))
+
+    def test_arm_commands(self):
+        self.assertEqual(
+            events.arm_commands(("Frakoblet", "Fuldsikring", "Deltilkobling")),
+            {"disarm": "Frakoblet", "away": "Fuldsikring", "home": "Deltilkobling"},
+        )
+        mapping = events.arm_commands(
+            ("Frakoblet", "Fuldsikring", "Deltilkobling 1", "Deltilkobling 2", "Deltilkobling 3")
+        )
+        self.assertEqual(mapping["night"], "Deltilkobling 2")
+        self.assertEqual(mapping["custom"], "Deltilkobling 3")
+
+    def test_temperature_and_duress(self):
+        self.assertEqual(events.zone_temperature("21,5 °C"), 21.5)
+        self.assertIsNone(events.zone_temperature("Luk"))
+        data = parser.PanelData("Frakoblet", reports=(report("2026-01-02 11:59:00", "1121", 0),))
+        self.assertFalse(events.alarm_is_triggered(data, datetime(2026, 1, 2, 12), armed=False))
+
+    def test_supervision_from_log(self):
+        history = (parser.LogEntry("2026-01-02 10:00:00", "Zone18 (Garageport)", "", "Supervision fejl", 18),)
+        self.assertTrue(events.zone_supervision_lost(parser.PanelData("x", history=history), 18))
+
+
+class TriggeredTests(unittest.TestCase):
+    now = datetime(2026, 1, 2, 12, 0, 0)
+
+    def data(self, *reports):
+        return parser.PanelData("Fuldsikring", devices=DEVICES, reports=reports)
+
+    def test_burglary_while_armed(self):
+        data = self.data(report("2026-01-02 11:59:00", "1130", 1, "Indbrud"))
+        self.assertTrue(events.alarm_is_triggered(data, self.now, armed=True))
+        self.assertFalse(events.alarm_is_triggered(data, self.now, armed=False))
+        self.assertEqual(events.last_alarm(data).event, "Indbrud")
+
+    def test_disarm_report_ends_alarm(self):
+        data = self.data(
+            report("2026-01-02 11:59:30", "1401", 1),
+            report("2026-01-02 11:59:00", "1130", 1),
+        )
+        self.assertFalse(events.alarm_is_triggered(data, self.now, armed=True))
+
+    def test_partial_arm_report_ends_alarm(self):
+        # The TrueGuard MZ reports partial arm as 3456.
+        data = self.data(
+            report("2026-01-02 11:59:30", "3456", 1),
+            report("2026-01-02 11:59:00", "1130", 1),
+        )
+        self.assertFalse(events.alarm_is_triggered(data, self.now, armed=True))
+
+    def test_alarm_expires(self):
+        data = self.data(report("2026-01-02 10:00:00", "1130", 1))
+        self.assertFalse(events.alarm_is_triggered(data, self.now, armed=True))
+
+    def test_fire_alarm_while_disarmed_until_restore(self):
+        fire = report("2026-01-02 11:59:00", "1111", 2, "Brand")
+        self.assertTrue(events.alarm_is_triggered(self.data(fire), self.now, armed=False))
+        restored = self.data(report("2026-01-02 11:59:40", "3111", 2), fire)
+        self.assertFalse(events.alarm_is_triggered(restored, self.now, armed=False))
+
+    def test_alarm_before_panel_restart_is_over(self):
+        data = parser.PanelData(
+            "Fuldsikring",
+            devices=DEVICES,
+            history=(parser.LogEntry("2026-01-02 11:59:30", "", "", "Enhed tændt", None),),
+            reports=(report("2026-01-02 11:59:00", "1130", 1),),
+        )
+        self.assertFalse(events.alarm_is_triggered(data, self.now, armed=True))
+
+    def test_tamper_is_not_an_alarm(self):
+        data = self.data(report("2026-01-02 11:59:00", "1383", 1))
+        self.assertFalse(events.alarm_is_triggered(data, self.now, armed=True))
+        self.assertIsNone(events.last_alarm(data))
+
+
+if __name__ == "__main__":
+    unittest.main()

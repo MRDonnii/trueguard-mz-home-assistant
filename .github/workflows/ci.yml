@@ -1,0 +1,18 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: MRDonnii/ha-room-energy-optimizer/.github/workflows/ha-integration-ci.yml@main
+    with:
+      pytest-args: "-q -p no:cacheprovider tests tests_ha"
+      # The camera platform imports HA's camera component, which needs turbojpeg.
+      extra-packages: PyTurboJPEG

@@ -1,0 +1,469 @@
+"""Set up the integration against synthetic panel pages."""
+
+from __future__ import annotations
+
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
+
+from custom_components.trueguard_mz.const import DOMAIN, EVENT_TRUEGUARD
+from custom_components.trueguard_mz.diagnostics import (
+    async_get_config_entry_diagnostics,
+)
+
+HOST = "http://192.0.2.10"
+
+CONTROL = """<h1>Panel styring</h1><form>Panel tilstand:Fuldsikring<br/>
+<table class=fm><tr><td>Aktive fejl</td><td></td></tr>
+<tr><td colspan=2 class=ct>Ingen enheder fundet</td></tr></table></form>"""
+
+DEVICE = """<table class=fm>
+<tr><td>Index</td><td>Type</td><td>Navn</td><td>Attribute</td><td>Tilstand</td>
+<td>Batteri</td><td>Sabotage</td><td>Deaktiver enhed</td><td>Signal</td><td>Status</td><td></td></tr>
+<tr><td>1</td><td>Dørkontakt</td><td>Hoveddør</td><td>Indgang1</td><td></td><td></td>
+<td></td><td></td><td></td><td></td><td>Ændre</td></tr>
+<tr><td>2</td><td>Røgalarm</td><td>Gang</td><td>Brand</td><td></td><td></td>
+<td></td><td></td><td>7</td><td></td><td>Ændre</td></tr>
+</table>"""
+
+HISTORY = """<table class=fm><tr><td>Tid</td><td>Enhed</td><td>Bruger</td><td>Hændelse</td></tr>
+<tr><td>2026-01-02 09:00:00</td><td>Zone1 (Hoveddør)</td><td></td><td>Sabotage</td></tr>
+<tr><td>2026-01-02 08:00:00</td><td></td><td>Bruger 1</td><td>Fuldsikring</td></tr>
+</table>"""
+
+HISTORY_NEW = HISTORY.replace(
+    "<tr><td>2026-01-02 09:00:00",
+    "<tr><td>2026-01-02 09:30:00</td><td>Zone1 (Hoveddør)</td><td></td>"
+    "<td>Sabotage ok</td></tr><tr><td>2026-01-02 09:00:00",
+)
+
+REPORTS = """<table class=fm><tr><td>Tid</td><td>Hændelse</td><td>CID hændelse</td>
+<td>Gruppe</td><td>Zone / Bruger</td><td>Status</td></tr>
+<tr><td>2026-01-02 09:00:00</td><td>Sabotage</td><td>1383</td><td>1</td><td>1</td><td>Færdig</td></tr>
+<tr><td>2026-01-02 07:00:00</td><td>Indbrud</td><td>1130</td><td>1</td><td>1</td><td>Færdig</td></tr>
+</table>"""
+
+INDEX = """<table><tr><td>Firmware revision:</td><td>MZ-TEST 1.0</td></tr>
+<tr><td>MAC Adresse:</td><td>00:1D:94:00:00:01</td></tr></table>"""
+
+GSM = "<table><tr><td>Status:</td><td>SIM ikke monteret</td></tr></table>"
+
+
+def _select(name, value, text):
+    return f'<select name="{name}"><option value="0">Ikke aktiv</option><option value="{value}" selected>{text}</option></select>'
+
+
+AREA = (
+    "<table>"
+    f"<tr><td>Indgangstid1:</td><td>Fuldsikring:{_select('a', 20, '20 sek')} Deltilkobling:{_select('b', 10, '10 sek')}</td></tr>"
+    f"<tr><td>Udgangstid:</td><td>Fuldsikring:{_select('c', 30, '30 sek')} Deltilkobling:{_select('d', 10, '10 sek')}</td></tr>"
+    f"<tr><td>Sirene tid:</td><td>{_select('e', 3, '3 min')}</td></tr>"
+    f"<tr><td>Supervision timer:</td><td>{_select('f', 240, '4 timer')}</td></tr>"
+    "</table>"
+)
+
+
+def _panel_page(clock="2026-01-02 12:00"):
+    date, time = clock.split()
+    y, mo, d = date.split("-")
+    h, mi = time.split(":")
+    return "".join(
+        f'<select name="{n}"><option value="{int(v)}" selected>{v}</option></select>'
+        for n, v in (("Y", y), ("M", mo), ("D", d), ("E", h), ("F", mi))
+    )
+
+
+def _mock_pages(aioclient_mock, history=HISTORY, **pages):
+    aioclient_mock.clear_requests()
+    bodies = {
+        "control.htm": CONTROL,
+        "device.htm": DEVICE,
+        "history.htm": history,
+        "rptevent.htm": REPORTS,
+        "index.htm": INDEX,
+        "gsm.htm": GSM,
+        "area.htm": AREA,
+        "panel.htm": _panel_page(),
+    }
+    bodies.update({f"{key}.htm": value for key, value in pages.items()})
+    for page, body in bodies.items():
+        aioclient_mock.get(f"{HOST}/{page}", text=body)
+
+
+async def test_setup_entities_and_events(hass, aioclient_mock):
+    _mock_pages(aioclient_mock)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        title="TrueGuard MZ",
+        unique_id="00:1d:94:00:00:01",
+        data={"host": HOST, "username": "u", "password": "p", "scan_interval": 10},
+        options={"event_interval": 2},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    alarm = hass.states.get("alarm_control_panel.trueguard_mz")
+    assert alarm.state == "armed_away"  # alarm at 07:00 is older than one hour
+    assert alarm.attributes["last_alarm"] == "Indbrud"
+    assert alarm.attributes["last_alarm_zone_name"] == "Hoveddør"
+    assert alarm.attributes["changed_by"] == "Bruger 1"
+
+    assert hass.states.get("binary_sensor.hoveddor").state == "off"
+    assert hass.states.get("binary_sensor.gang").attributes["device_class"] == "smoke"
+    assert hass.states.get("binary_sensor.hoveddor_sabotage").state == "on"
+    assert hass.states.get("binary_sensor.hoveddor_batteri").state == "off"
+    assert hass.states.get("binary_sensor.hoveddor_forbindelse").state == "on"
+    assert hass.states.get("binary_sensor.trueguard_mz_sabotage").state == "off"
+    assert hass.states.get("sensor.hoveddor_sidste_haendelse").state == "Sabotage"
+    assert hass.states.get("sensor.hoveddor_signal").state == "unknown"
+    assert hass.states.get("sensor.gang_signal").state == "7"
+    assert (
+        hass.states.get("sensor.trueguard_mz_sidste_haendelse").state
+        == "Zone1 (Hoveddør): Sabotage"
+    )
+    assert hass.states.get("sensor.trueguard_mz_seneste_alarm").state == "Indbrud – Hoveddør"
+    assert hass.states.get("sensor.trueguard_mz_gsm").state == "SIM ikke monteret"
+
+    from homeassistant.helpers import device_registry as dr
+
+    panel = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, entry.entry_id)})
+    assert panel.sw_version == "MZ-TEST 1.0"
+
+    fired = []
+    hass.bus.async_listen(EVENT_TRUEGUARD, fired.append)
+    _mock_pages(aioclient_mock, HISTORY_NEW)
+    coordinator = entry.runtime_data.coordinator
+    coordinator._events_read_at = None  # force the event log to be read now
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert [event.data["event"] for event in fired] == ["Sabotage ok"]
+    assert fired[0].data["zone_name"] == "Hoveddør"
+    assert hass.states.get("binary_sensor.hoveddor_sabotage").state == "off"
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+    assert diagnostics["entry"]["password"] == "**REDACTED**"
+    assert diagnostics["info"]["mac"] == "**REDACTED**"
+    assert len(diagnostics["history"]) == 3
+
+
+async def test_follows_panel_names_and_zones(hass, aioclient_mock):
+    _mock_pages(aioclient_mock)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        title="TrueGuard MZ",
+        data={"host": HOST, "username": "u", "password": "p", "scan_interval": 10},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    from homeassistant.helpers import device_registry as dr
+
+    registry = dr.async_get(hass)
+    ident = {(DOMAIN, f"{entry.entry_id}_zone_1")}
+    assert registry.async_get_device(identifiers=ident).name == "Hoveddør"
+
+    # Renamed on the panel: the device and friendly names follow without a reload.
+    renamed = DEVICE.replace("Hoveddør", "Fordør")
+    _mock_pages(aioclient_mock, device=renamed)
+    await entry.runtime_data.coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert registry.async_get_device(identifiers=ident).name == "Fordør"
+    assert hass.states.get("binary_sensor.hoveddor_batteri").attributes[
+        "friendly_name"
+    ] == "Fordør Batteri"
+
+    # A new zone on the panel: the entry reloads and creates its entities.
+    added = renamed.replace(
+        "</table>",
+        "<tr><td>3</td><td>PIR</td><td>Stue</td><td>Indbrud</td><td></td><td></td>"
+        "<td></td><td></td><td>5</td><td></td><td>Ændre</td></tr></table>",
+    )
+    _mock_pages(aioclient_mock, device=added)
+    await entry.runtime_data.coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.stue").attributes["device_class"] == "motion"
+
+
+async def test_countdowns_siren_and_clock(hass, aioclient_mock, freezer):
+    from datetime import timedelta
+
+    freezer.move_to("2026-01-02 12:00:30+01:00")
+    disarmed = CONTROL.replace("Fuldsikring", "Frakoblet")
+    _mock_pages(aioclient_mock, control=disarmed, panel=_panel_page("2026-01-02 12:02"))
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        title="TrueGuard MZ",
+        data={"host": HOST, "username": "u", "password": "p", "scan_interval": 10},
+    )
+    entry.add_to_hass(hass)
+    await hass.config.async_set_time_zone("Europe/Copenhagen")
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data.coordinator
+
+    alarm = hass.states.get("alarm_control_panel.trueguard_mz")
+    assert alarm.state == "disarmed"
+    assert alarm.attributes["siren_time"] == 180
+    assert alarm.attributes["exit_delay"] == 30
+    assert hass.states.get("sensor.trueguard_mz_ur_afvigelse").state == "2"
+
+    # Armed away: the 30 s exit delay shows as arming, then armed_away.
+    _mock_pages(aioclient_mock)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    alarm = hass.states.get("alarm_control_panel.trueguard_mz")
+    assert alarm.state == "arming"
+    assert "countdown_until" in alarm.attributes
+    freezer.tick(timedelta(seconds=31))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert hass.states.get("alarm_control_panel.trueguard_mz").state == "armed_away"
+
+    # The entry door opens: 20 s entry delay shows as pending.
+    _mock_pages(aioclient_mock, device=DEVICE.replace("<td></td><td>Ændre</td></tr>\n<tr><td>2", "<td>Åben</td><td>Ændre</td></tr>\n<tr><td>2", 1))
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get("binary_sensor.hoveddor").state == "on"
+    assert hass.states.get("alarm_control_panel.trueguard_mz").state == "pending"
+    freezer.tick(timedelta(seconds=21))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert hass.states.get("alarm_control_panel.trueguard_mz").state == "armed_away"
+
+    # A burglary report: triggered for the 3 min siren time, then armed again.
+    burglary = REPORTS.replace(
+        "<tr><td>2026-01-02 09:00:00",
+        "<tr><td>2026-01-02 12:01:30</td><td>Indbrud</td><td>1130</td><td>1</td>"
+        "<td>1</td><td>Færdig</td></tr><tr><td>2026-01-02 09:00:00",
+    )
+    _mock_pages(aioclient_mock, rptevent=burglary)
+    coordinator._events_read_at = None
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get("alarm_control_panel.trueguard_mz").state == "triggered"
+    freezer.move_to("2026-01-02 12:04:40+01:00")
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert hass.states.get("alarm_control_panel.trueguard_mz").state == "armed_away"
+
+
+async def test_migrates_v2_and_loads_v3_entries(hass, aioclient_mock):
+    """Entries saved as version 2 (HACS) or 3 (early builds) both load."""
+    _mock_pages(aioclient_mock)
+    entries = []
+    for version, host in ((2, HOST), (3, HOST)):
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            version=version,
+            title=f"TrueGuard MZ v{version}",
+            data={"host": host, "username": "u", "password": "p"},
+        )
+        entry.add_to_hass(hass)
+        entries.append(entry)
+    # Setting up the first entry loads the integration and with it both entries.
+    assert await hass.config_entries.async_setup(entries[0].entry_id)
+    await hass.async_block_till_done()
+    for entry in entries:
+        assert entry.state.value == "loaded"
+        assert entry.version == 3
+
+
+async def test_push_report_triggers_at_once(hass, aioclient_mock, socket_enabled):
+    """A pushed burglary report shows as triggered before the next poll."""
+    import asyncio
+
+    _mock_pages(aioclient_mock)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=3,
+        title="TrueGuard MZ",
+        data={"host": HOST, "username": "u", "password": "p", "scan_interval": 3600},
+        options={"receiver_enabled": True, "receiver_port": 0, "receiver_account": "1234"},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass.states.get("alarm_control_panel.trueguard_mz").state == "armed_away"
+    assert hass.states.get("sensor.trueguard_mz_sidste_kontakt_fra_centralen").state == "unknown"
+
+    server = entry.runtime_data.receiver
+    server._allowed = {"127.0.0.1"}  # the test connects from localhost
+    reports = []
+    hass.bus.async_listen("trueguard_mz_report", reports.append)
+
+    from custom_components.trueguard_mz.receiver import crc16
+
+    body = '"ADM-CID"0042L0#1234[#1234|1130 01 001]'
+    frame = b"\n" + f"{crc16(body.encode())}{len(body):04X}".encode() + body.encode() + b"\r"
+    reader, writer = await asyncio.open_connection("127.0.0.1", server.bound_port)
+    writer.write(frame)
+    await writer.drain()
+    ack = await asyncio.wait_for(reader.read(100), 5)
+    writer.close()
+    assert b'"ACK"0042L0#1234[]' in ack
+    await hass.async_block_till_done()
+
+    assert reports and reports[0].data["cid"] == "1130"
+    assert reports[0].data["zone_name"] == "Hoveddør"
+    alarm = hass.states.get("alarm_control_panel.trueguard_mz")
+    assert alarm.state == "triggered"
+    assert alarm.attributes["last_alarm"] == "Indbrud"
+    assert hass.states.get("sensor.trueguard_mz_sidste_kontakt_fra_centralen").state != "unknown"
+
+    # A wrong account is ignored without an ACK.
+    body = '"ADM-CID"0043L0#9999[#9999|1130 01 001]'
+    frame = b"\n" + f"{crc16(body.encode())}{len(body):04X}".encode() + body.encode() + b"\r"
+    reader, writer = await asyncio.open_connection("127.0.0.1", server.bound_port)
+    writer.write(frame)
+    await writer.drain()
+    assert await asyncio.wait_for(reader.read(100), 5) == b""
+    writer.close()
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    assert server.bound_port is None
+
+
+BIG_DEVICE = """<table class=fm>
+<tr><td>Index</td><td>Type</td><td>Navn</td><td>Attribute</td><td>Tilstand</td>
+<td>Batteri</td><td>Sabotage</td><td>Deaktiver enhed</td><td>Signal</td><td>Status</td><td></td></tr>
+<tr><td>2</td><td>Dørkontakt</td><td>Bryggersdør</td><td>Indgang1</td><td></td><td></td><td></td><td></td><td>9</td><td>Luk</td><td></td></tr>
+<tr><td>5</td><td>Røgsensor</td><td>Røg 1st</td><td>24 Timer</td><td></td><td></td><td></td><td>Permanent deaktiver</td><td>9</td><td></td><td></td></tr>
+<tr><td>15</td><td>PIR m. kamera</td><td>Kamera gang</td><td>Fuldsikring</td><td></td><td></td><td></td><td></td><td>9</td><td></td><td></td></tr>
+<tr><td>18</td><td>Tænd/sluk modul</td><td>Garageport</td><td></td><td>Funktionsfejl</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr><td>20</td><td>Dæmper modul</td><td>Lampe</td><td></td><td></td><td></td><td></td><td></td><td></td><td>50 %</td><td></td></tr>
+<tr><td>21</td><td>Rullegardin</td><td>Gardin</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr><td>22</td><td>Temperatursensor</td><td>Kælder</td><td></td><td></td><td></td><td></td><td></td><td>7</td><td>21,5 °C</td><td></td></tr>
+<tr><td>25</td><td>Dørkontakt</td><td>Garagedør</td><td>Indbrud</td><td></td><td></td><td></td><td></td><td>9</td><td>Åben</td><td></td></tr>
+</table>"""
+
+BIG_CONTROL = """<form>Panel tilstand:Deltilkobling 2<br/>
+<input name="S" value="Frakoblet" type=submit class=sbtn  />
+<input name="S" value="Fuldsikring" type=submit class=sbtn  />
+<input name="S" value="Deltilkobling 1" type=submit class=sbtn  />
+<input name="S" value="Deltilkobling 2" type=submit class=sbtn  />
+<input name="S" value="Deltilkobling 3" type=submit class=sbtn  />
+<table class=fm><tr><td>Aktive fejl</td><td></td></tr>
+<tr><td>Sensortjek fejl</td><td>Zone18 (Garageport)</td></tr></table></form>"""
+
+BIG_REPORTS = """<table class=fm><tr><td>Tid</td><td>Hændelse</td><td>CID hændelse</td>
+<td>Gruppe</td><td>Zone / Bruger</td><td>Status</td></tr>
+<tr><td>2026-01-02 11:00:05</td><td>Gå-test</td><td>1607</td><td>0</td><td>0</td><td>Færdig(Ingen forbindelse)</td></tr>
+<tr><td>2026-01-02 11:00:00</td><td>Zone bypass</td><td>1570</td><td>1</td><td>25</td><td>Færdig</td></tr>
+<tr><td>2026-01-02 10:59:59</td><td>Deltilkobling</td><td>3456</td><td>1</td><td>1</td><td>Færdig</td></tr>
+<tr><td>2026-01-02 10:00:00</td><td>Supervision fejl</td><td>1147</td><td>1</td><td>18</td><td>Færdig</td></tr>
+</table>"""
+
+CAPTURES = """<table class=fm><tr><td>Tid</td><td>Enhed</td><td>Type</td><td>Status</td></tr>
+<tr><td>2026-01-02 11:01:00</td><td>Zone15 (Kamera gang)</td><td>Billede</td>
+<td><a href="cap1.jpg">Vis</a></td></tr></table>"""
+
+PANEL_CHECKIN = _panel_page() + (
+    "<table><tr><td>Auto check-in:</td><td>Interval:"
+    '<select name="i"><option value="0">Ikke aktiv</option>'
+    '<option value="240" selected>4 timer</option></select></td></tr>'
+    "<tr><td>Høj temperatur:</td><td>"
+    '<select name="h"><option value="30" selected>30 °C</option></select></td></tr></table>'
+)
+
+
+async def test_large_panel_features(hass, aioclient_mock, freezer, tmp_path, socket_enabled):
+    """Cameras, dimmer, cover, temperature, faults, bypass, walk test, arm modes."""
+    freezer.move_to("2026-01-02 11:02:00+01:00")
+    await hass.config.async_set_time_zone("Europe/Copenhagen")
+    _mock_pages(
+        aioclient_mock,
+        control=BIG_CONTROL,
+        device=BIG_DEVICE,
+        rptevent=BIG_REPORTS,
+        capevent=CAPTURES,
+        panel=PANEL_CHECKIN,
+    )
+    aioclient_mock.get(f"{HOST}/cap1.jpg", content=b"\xff\xd8JPEGDATA", headers={"Content-Type": "image/jpeg"})
+    aioclient_mock.get(f"{HOST}/cfg.bin", content=b"CFGDATA")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=3,
+        title="TrueGuard MZ",
+        data={"host": HOST, "username": "u", "password": "p", "scan_interval": 10},
+        options={"receiver_enabled": True, "receiver_port": 0},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    get = hass.states.get
+
+    alarm = get("alarm_control_panel.trueguard_mz")
+    assert alarm.state == "armed_night"
+    assert alarm.attributes["supported_features"] == 1 | 2 | 4 | 16  # home, away, night, custom
+
+    assert get("binary_sensor.garageport_fejl").state == "on"
+    assert get("binary_sensor.garageport_fejl").attributes["reason"] == "Funktionsfejl"
+    assert get("binary_sensor.rog_1st_udkoblet").state == "on"
+    assert get("binary_sensor.garagedor_udkoblet").state == "on"  # CID 1570
+    assert get("binary_sensor.bryggersdor_udkoblet").state == "off"
+    assert get("binary_sensor.garageport_forbindelse").state == "off"  # CID 1147
+    assert get("binary_sensor.garageport_batteri") is None  # mains module
+    assert get("binary_sensor.trueguard_mz_ga_test").state == "on"
+    assert get("binary_sensor.trueguard_mz_rapportering").state == "on"
+    assert get("binary_sensor.trueguard_mz_rapportering_virker").state == "on"
+
+    assert get("sensor.kaelder_temperatur").state == "21.5"
+    assert get("sensor.kaelder_temperatur").attributes["alarm_above"] == 30
+    lamp = get("light.lampe")
+    assert lamp.state == "on" and lamp.attributes["brightness"] == 128
+    assert get("cover.gardin") is not None
+    assert get("switch.garageport") is not None
+
+    camera = get("camera.kamera_gang_billede")
+    assert camera.attributes["time"] == "2026-01-02 11:01:00"
+    from homeassistant.components.camera import async_get_image
+
+    image = await async_get_image(hass, "camera.kamera_gang_billede")
+    assert image.content == b"\xff\xd8JPEGDATA"
+    assert get("button.kamera_gang_tag_billede") is not None
+
+    # Arm night presses "Deltilkobling 2" on control.htm.
+    aioclient_mock.post(f"{HOST}/control.htm", text=BIG_CONTROL)
+    await hass.services.async_call(
+        "alarm_control_panel", "alarm_arm_night",
+        {"entity_id": "alarm_control_panel.trueguard_mz"}, blocking=True,
+    )
+    posted = [call for call in aioclient_mock.mock_calls if call[0] == "POST"]
+    assert posted[-1][2] == {"S": "Deltilkobling 2"}
+
+    # Backup button writes /config/trueguard_mz/backups/cfg-*.bin.
+    hass.config.config_dir = str(tmp_path)
+    await hass.services.async_call(
+        "button", "press", {"entity_id": "button.trueguard_mz_tag_backup"}, blocking=True
+    )
+    await hass.async_block_till_done()
+    backups = list((tmp_path / "trueguard_mz" / "backups").glob("cfg-*.bin"))
+    assert len(backups) == 1 and backups[0].read_bytes() == b"CFGDATA"
+    assert get("sensor.trueguard_mz_seneste_backup").state != "unknown"
+
+    # The zone "Aktiv" switch exists but is disabled until the user enables it.
+    from homeassistant.helpers import entity_registry as er
+
+    registry = er.async_get(hass)
+    active = registry.async_get("switch.bryggersdor_aktiv")
+    assert active.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+    assert registry.async_get("switch.garageport_aktiv") is None  # modules have none
+    registry.async_update_entity(active.entity_id, disabled_by=None)
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert get("switch.bryggersdor_aktiv").state == "on"
+    assert get("switch.rog_1st_aktiv") is None  # other zones stay disabled
+
+    aioclient_mock.post(f"{HOST}/device.htm", text=BIG_DEVICE)
+    await hass.services.async_call(
+        "switch", "turn_off", {"entity_id": "switch.bryggersdor_aktiv"}, blocking=True
+    )
+    posted = [call for call in aioclient_mock.mock_calls if call[0] == "POST"]
+    assert posted[-1][2] == {"Z2": "1", "S": "Deaktiver enhed"}
+    assert await hass.config_entries.async_unload(entry.entry_id)
